@@ -1226,6 +1226,20 @@ class StartupValidationTests(unittest.TestCase):
 
         scan_app._validate_startup_configuration(fake_config_manager)
 
+    def test_validate_startup_configuration_requires_secret_in_production(self):
+        fake_config_manager = Mock()
+        fake_config_manager.get_default_user.return_value = "alice"
+        fake_config_manager.get_global.return_value = None
+
+        with patch.dict("os.environ", {}, clear=True):
+            with self.assertRaises(RuntimeError) as context:
+                scan_app._validate_startup_configuration(
+                    fake_config_manager, production=True
+                )
+
+        self.assertIn("production", str(context.exception))
+        self.assertIn("secret_key", str(context.exception))
+
 
 class ApiScanLockTests(unittest.TestCase):
     def setUp(self):
