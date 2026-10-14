@@ -213,17 +213,34 @@ def _has_configured_secret_key(config_manager: ConfigManager | None = None) -> b
     return isinstance(configured_secret, str) and configured_secret.strip() != ""
 
 
-def _validate_startup_configuration(config_manager: ConfigManager | None = None) -> None:
+def _validate_startup_configuration(
+    config_manager: ConfigManager | None = None, *, production: bool = False
+) -> None:
     manager = config_manager or get_config_manager()
     default_user = _resolve_default_user(manager)
-    if default_user is None and not _has_configured_secret_key(manager):
+    has_secret_key = _has_configured_secret_key(manager)
+
+    if not has_secret_key and (production or default_user is None):
+        mode = "production" if production else "login"
         raise RuntimeError(
-            "ScanExpress is not configured properly: set [global].secret_key "
-            "or SCANEXPRESS_SECRET_KEY when global.default_user is not set."
+            f"ScanExpress is not configured properly for {mode} mode: set "
+            "[global].secret_key or SCANEXPRESS_SECRET_KEY."
         )
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 app.secret_key = _resolve_secret_key()
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=_env_flag("SCANEXPRESS_SECURE_COOKIES", default=False),
+)
 
 
 def _resolve_auth_realm() -> str:
@@ -1657,4 +1674,4 @@ if __name__ == "__main__":
         app.logger.error("Startup configuration error: %s", exc)
         raise SystemExit(1) from exc
 
-    app.run(host="0.0.0.0", port=8000, debug=True)
+    app.run(host="127.0.0.1", port=8000, debug=False)
