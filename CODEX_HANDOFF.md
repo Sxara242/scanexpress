@@ -27,6 +27,37 @@ Useful existing components include:
 
 The fork must preserve MIT attribution for upstream code.
 
+
+## Current implementation status — 2026-10-14
+
+Merged to `main`:
+
+- Phase 0: production hardening, Gunicorn/loopback deployment, persistent app-data layout, SQLite bootstrap, CI hardening.
+- Phase 1: persistent Pending PDFs, review page, PDF preview/download, dynamic Paperless metadata, create-new metadata objects, explicit Paperless submit, retry/task-state handling.
+- Phase 2: persistent Document/Batch session state machine.
+
+Phase 2 behavior now implemented:
+
+- one open scan session per user,
+- Document mode persists each captured page until Finish,
+- repeated Document captures append to the same persistent session,
+- Finish creates one multi-page Pending PDF,
+- Batch mode creates independent Pending documents per capture,
+- Finish closes Batch without merging its items,
+- switching Document <-> Batch is rejected until Finish,
+- open session/page spool survives process restarts,
+- scan errors are recorded without deleting already captured pages/items,
+- batch Pending navigation is session-aware,
+- Apply to remaining / Apply to all copies shared metadata but deliberately preserves independent titles.
+
+Phase 2 PR CI passed before merge. Main post-merge CI should also remain green before starting production deployment changes.
+
+Next engineering phase:
+
+**Phase 3 — physical button adapter and scanbd/scanbm coordination.**
+
+Do not bypass the existing session APIs. Hardware events should map into the Phase 2 state machine rather than duplicating capture/business logic.
+
 ## Reference hardware
 
 Canon CanoScan LiDE 400 on Linux/SANE.
@@ -149,11 +180,11 @@ Do not start with scanbd integration.
 
 Recommended order:
 
-1. Add persistent Pending model/spool and migrations.
-2. Split scan/finalize from Paperless upload.
-3. Add preview + metadata + explicit submit.
-4. Add Document/Batch state machine.
-5. Add hardware-event adapter and scanbd coordination.
+1. ~~Add persistent Pending model/spool and migrations.~~ DONE
+2. ~~Split scan/finalize from Paperless upload.~~ DONE
+3. ~~Add preview + metadata + explicit submit.~~ DONE
+4. ~~Add Document/Batch state machine.~~ DONE
+5. **NEXT:** Add hardware-event adapter and scanbd/scanbm coordination.
 6. Do real LiDE 400 acceptance testing.
 
 This order keeps most logic testable without hardware.
