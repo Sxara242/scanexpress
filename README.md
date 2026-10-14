@@ -15,6 +15,20 @@ For local development setup, Playwright e2e smoke tests, and iterative deploymen
 
 For current production UI requirements and acceptance criteria, see [docs/UI_FINALIZATION_SPEC.md](docs/UI_FINALIZATION_SPEC.md).
 
+## Scanner Manager fork status
+
+This fork is evolving ScanExpress into the physical-button and Pending-review
+workflow described in `docs/SCANNER_MANAGER_MASTER_SPEC.md`.
+
+The reference production deployment uses a systemd-managed Gunicorn process
+bound to loopback. The service template initializes persistent state under
+`/var/lib/scanexpress` before startup. Set a real `secret_key` (or
+`SCANEXPRESS_SECRET_KEY`) before production startup; the WSGI entry point
+fails closed when it is missing.
+
+Captured Pending documents and the SQLite state database belong in the
+configured data directory, never in the Git working tree.
+
 ## Server Installation
 
 Use this section for one-time server setup. Use the development guide for iterative update workflows.
