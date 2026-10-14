@@ -146,7 +146,7 @@ function renderSelected() {
   const locked = item.state === "submitted" || item.state === "submitting";
   submitButton.disabled = locked;
   form.querySelectorAll("input, select").forEach((control) => {
-    control.disabled = item.state === "submitted";
+    control.disabled = locked;
   });
 
   if (item.state === "failed" && item.last_error) {
@@ -218,6 +218,25 @@ function metadataPayload() {
   };
 }
 
+async function refreshSelectedDetail(pendingId = selectedId) {
+  if (!pendingId) return null;
+  const response = await fetch(`/api/pending/${pendingId}`);
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload?.message || "Failed to refresh Pending document.");
+  }
+  const index = pendingItems.findIndex((entry) => entry.id === pendingId);
+  if (index >= 0) {
+    pendingItems[index] = payload.pending;
+  } else {
+    pendingItems.unshift(payload.pending);
+  }
+  selectedId = pendingId;
+  render();
+  return payload.pending;
+}
+
+
 async function saveMetadata() {
   const item = selectedItem();
   if (!item) return null;
@@ -254,9 +273,18 @@ async function submitSelected() {
     if (!response.ok) {
       throw new Error(payload?.message || "Paperless submission failed.");
     }
-    await loadPending(item.id);
+    const index = pendingItems.findIndex((entry) => entry.id === item.id);
+    if (index >= 0 && payload.pending) {
+      pendingItems[index] = payload.pending;
+      render();
+    }
     if (payload.paperless_task_id) {
       scheduleTaskPolling(payload.paperless_task_id);
+    } else if (payload.pending?.state === "submitted") {
+      const suffix = payload.pending.paperless_document_id
+        ? ` Document ID: ${payload.pending.paperless_document_id}`
+        : "";
+      setStatus(`Submitted successfully.${suffix}`);
     }
   } catch (error) {
     setStatus(error.message || "Submission failed.", true);
@@ -283,7 +311,7 @@ function scheduleTaskPolling(taskId) {
       if (!response.ok) {
         throw new Error(payload?.message || "Task status lookup failed.");
       }
-      await loadPending(selectedId);
+      await refreshSelectedDetail(selectedId);
       if (payload.task_status !== "SUCCESS" && payload.task_status !== "FAILURE") {
         scheduleTaskPolling(taskId);
       } else {
