@@ -447,3 +447,14 @@ button#scanButton:disabled {
     justify-self: stretch;
   }
 }
+
+.app-header-nav-link {
+  color: #ffffff;
+  font-weight: 700;
+  text-decoration: underline;
+  margin-right: 12px;
+}
+
+.app-header-nav-link:hover {
+  text-decoration-thickness: 2px;
+}

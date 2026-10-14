@@ -3,9 +3,13 @@ const http = require("http");
 const { promises: fs } = require("fs");
 
 const modeFilePath = process.env.SCANEXPRESS_FAKE_SCAN_MODE_FILE;
+const e2eDataDir = process.env.SCANEXPRESS_DATA_DIR;
 
 if (!modeFilePath) {
   throw new Error("SCANEXPRESS_FAKE_SCAN_MODE_FILE must be set for e2e tests.");
+}
+if (!e2eDataDir) {
+  throw new Error("SCANEXPRESS_DATA_DIR must be set for e2e tests.");
 }
 
 let fakePaperlessServer;
@@ -13,7 +17,44 @@ let paperlessUploadDelayMs = 0;
 
 test.beforeAll(async () => {
   fakePaperlessServer = http.createServer((req, res) => {
-    if (req.method === "POST" && req.url === "/api/documents/post_document/") {
+    const url = new URL(req.url, "http://127.0.0.1:18089");
+    const metadataLists = {
+      "/api/tags/": [
+        { id: 1, name: "Personal" },
+        { id: 2, name: "Education" },
+      ],
+      "/api/correspondents/": [
+        { id: 21, name: "School" },
+      ],
+      "/api/document_types/": [
+        { id: 11, name: "Certificate" },
+      ],
+      "/api/storage_paths/": [
+        { id: 31, name: "Personal documents" },
+      ],
+    };
+
+    if (req.method === "GET" && metadataLists[url.pathname]) {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ results: metadataLists[url.pathname], next: null }));
+      return;
+    }
+
+    if (
+      req.method === "POST"
+      && ["/api/tags/", "/api/correspondents/", "/api/document_types/"].includes(url.pathname)
+    ) {
+      let body = "";
+      req.on("data", (chunk) => { body += chunk; });
+      req.on("end", () => {
+        const payload = body ? JSON.parse(body) : {};
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ id: 99, name: payload.name || "Created" }));
+      });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/documents/post_document/") {
       req.on("data", () => {});
       req.on("end", () => {
         setTimeout(() => {
@@ -50,6 +91,7 @@ test.afterAll(async () => {
 
 test.beforeEach(async () => {
   paperlessUploadDelayMs = 0;
+  await fs.rm(e2eDataDir, { recursive: true, force: true });
   await fs.writeFile(modeFilePath, "success", "utf-8");
 });
 
@@ -246,86 +288,34 @@ test("switching device while scan is running enables Start Scan for other device
   await expect(scanButton).toBeEnabled();
 });
 
-test("switching to another device during upload re-enables Start Scan", async ({ page }) => {
-  paperlessUploadDelayMs = 4000;
-
+test("scan is saved as Pending, reviewed, and explicitly submitted", async ({ page }) => {
   await page.goto("/");
+  await page.locator('input[name="deviceConfig"][value="flatbed"]').check();
+  await page.getByLabel("Filename").fill("school-certificate");
+  await page.getByRole("button", { name: "Start Scan" }).click();
 
-  const scanButton = page.getByRole("button", { name: "Start Scan" });
-  const flatbedRadio = page.locator('input[name="deviceConfig"][value="flatbed"]');
+  await expect(page.locator("#statusText")).toContainText("Scan saved to Pending");
 
-  await scanButton.click();
-  await expect(scanButton).toBeDisabled();
-  await expect(page.locator("#statusText")).toHaveText(/Status: uploading \(.+\)/);
+  await page.getByRole("link", { name: "Review Pending" }).click();
+  await expect(page.getByRole("heading", { name: "Pending scans" })).toBeVisible();
+  await expect(page.locator(".pending-queue-item")).toHaveCount(1);
+  await expect(page.locator("#pendingPosition")).toHaveText("1 / 1");
+  await expect(page.locator("#pendingStateBadge")).toHaveText("ready");
+  await expect(page.locator("#pendingPreview")).toHaveAttribute("src", /\/api\/pending\/.+\/file/);
 
-  await flatbedRadio.check();
-  await expect(flatbedRadio).toBeChecked();
-  await expect(scanButton).toBeEnabled();
-  await expect(page.locator("#statusText")).toHaveText(/^Status: ok \(.+\)$/);
-});
+  await page.locator("#pendingTitle").fill("School Certificate - 2002");
+  await page.locator("#pendingDocumentDate").fill("2002-06-10");
+  await page.locator("#pendingDocumentType").selectOption("11");
+  await page.locator("#pendingCorrespondent").selectOption("21");
+  await page.locator("#pendingStoragePath").selectOption("31");
+  await page.locator("#pendingTags").selectOption(["1", "2"]);
 
-test("stale status response from previous device does not disable switched device", async ({ page }) => {
-  paperlessUploadDelayMs = 9000;
-  let fakeStatusCalls = 0;
-  let emulateFakeBusy = false;
+  await page.getByRole("button", { name: "Save metadata" }).click();
+  await expect(page.locator("#pendingStatus")).toHaveText("Metadata saved.");
 
-  await page.route("**/api/scan/status**", async (route) => {
-    const url = new URL(route.request().url());
-    const deviceName = url.searchParams.get("device_name");
-
-    if (deviceName === "fake") {
-      if (emulateFakeBusy) {
-        fakeStatusCalls += 1;
-        await new Promise((resolve) => setTimeout(resolve, 2000));
-      }
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          status: "ok",
-          in_progress: emulateFakeBusy,
-          username: "test",
-          device_name: "fake",
-          device_id: "fake-device",
-          scanimage_device_name: "fake-device",
-          device_lock_id: "fake-device",
-        }),
-      });
-      return;
-    }
-
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        status: "ok",
-        in_progress: false,
-        username: "test",
-        device_name: "flatbed",
-        device_id: "flatbed-device",
-        scanimage_device_name: "flatbed-device",
-        device_lock_id: "flatbed-device",
-      }),
-    });
-  });
-
-  await page.goto("/");
-
-  const scanButton = page.getByRole("button", { name: "Start Scan" });
-  const flatbedRadio = page.locator('input[name="deviceConfig"][value="flatbed"]');
-
-  await scanButton.click();
-  await expect(page.locator("#statusText")).toHaveText(/Status: uploading \(.+\)/);
-  fakeStatusCalls = 0;
-  emulateFakeBusy = true;
-  await expect.poll(() => fakeStatusCalls).toBeGreaterThan(0);
-
-  await flatbedRadio.check();
-  await expect(flatbedRadio).toBeChecked();
-  await expect(scanButton).toBeEnabled();
-
-  await page.waitForTimeout(2500);
-  await expect(scanButton).toBeEnabled();
+  await page.getByRole("button", { name: "Submit to Paperless" }).click();
+  await expect(page.locator("#pendingStateBadge")).toHaveText("submitted");
+  await expect(page.locator("#pendingStatus")).toContainText("Document ID: 4242");
 });
 
 test("recent uploads shows task polling transition and success document link", async ({ page }) => {

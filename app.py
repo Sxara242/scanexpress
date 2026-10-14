@@ -13,9 +13,18 @@ from queue import Queue
 from pathlib import Path
 
 import requests
-from flask import Flask, Response, jsonify, render_template, request, session, stream_with_context
+from flask import Flask, Response, jsonify, render_template, request, send_file, session, stream_with_context
 from flask_login import LoginManager, UserMixin, current_user, login_user, logout_user
 from config import ConfigManager
+from storage import (
+    apply_paperless_task_status,
+    create_pending_document,
+    get_pending_document,
+    list_pending_documents,
+    resolve_pending_pdf_path,
+    set_pending_submission_state,
+    update_pending_metadata,
+)
 
 try:
     from PIL import Image, ImageFile, UnidentifiedImageError
@@ -1070,13 +1079,147 @@ def _build_timing_metrics(
     }
 
 
-def _upload_pdf_to_paperless(pdf_path: Path, page_count: int, username: str | None = None) -> dict:
-    if username is None:
-        raise RuntimeError("username is required for Paperless upload.")
+_PAPERLESS_METADATA_ENDPOINTS = {
+    "tags": "tags",
+    "correspondents": "correspondents",
+    "document_types": "document_types",
+    "storage_paths": "storage_paths",
+}
 
+
+def _paperless_headers(username: str) -> dict[str, str]:
     api_token = get_config_manager().get_user_token(username)
     if not api_token:
         raise RuntimeError(f"No paperless API token configured for user '{username}' in config.ini.")
+    return {"Authorization": f"Token {api_token}"}
+
+
+def _paperless_api_url(path: str) -> str:
+    base_url = get_config_manager().get_paperless_base_url().rstrip("/")
+    normalized_path = path.lstrip("/")
+    return f"{base_url}/api/{normalized_path}"
+
+
+def _paperless_error_message(response, operation: str) -> str:
+    body = response.text.strip()
+    if len(body) > 300:
+        body = f"{body[:300]}..."
+    if not body:
+        body = response.reason or "unknown Paperless error"
+    return f"{operation} failed ({response.status_code}): {body}"
+
+
+def _fetch_paperless_metadata_collection(kind: str, username: str) -> list[dict]:
+    endpoint = _PAPERLESS_METADATA_ENDPOINTS.get(kind)
+    if endpoint is None:
+        raise ValueError("Unsupported Paperless metadata kind.")
+
+    next_url = _paperless_api_url(f"{endpoint}/?page_size=1000")
+    headers = _paperless_headers(username)
+    collected: list[dict] = []
+    pages_seen = 0
+
+    while next_url and pages_seen < 20:
+        pages_seen += 1
+        try:
+            response = requests.get(next_url, headers=headers, timeout=15)
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Paperless metadata request failed: {exc}") from exc
+        if response.status_code >= 400:
+            raise RuntimeError(_paperless_error_message(response, "Paperless metadata request"))
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise RuntimeError("Paperless metadata response was not valid JSON.") from exc
+
+        if isinstance(payload, list):
+            page_items = payload
+            next_url = None
+        elif isinstance(payload, dict):
+            page_items = payload.get("results", [])
+            next_url = payload.get("next")
+        else:
+            raise RuntimeError("Paperless metadata response had an unexpected shape.")
+
+        for item in page_items:
+            if not isinstance(item, dict):
+                continue
+            item_id = item.get("id")
+            name = item.get("name")
+            if item_id is None or not isinstance(name, str):
+                continue
+            collected.append({"id": item_id, "name": name})
+
+    return collected
+
+
+def _create_paperless_metadata_object(kind: str, name: str, username: str) -> dict:
+    if kind not in {"tags", "correspondents", "document_types"}:
+        raise ValueError("Creating this Paperless metadata kind is not supported.")
+
+    normalized_name = name.strip()
+    if not normalized_name:
+        raise ValueError("name is required.")
+
+    endpoint = _PAPERLESS_METADATA_ENDPOINTS[kind]
+    try:
+        response = requests.post(
+            _paperless_api_url(f"{endpoint}/"),
+            headers=_paperless_headers(username),
+            json={"name": normalized_name},
+            timeout=15,
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Paperless metadata create request failed: {exc}") from exc
+
+    if response.status_code >= 400:
+        raise RuntimeError(_paperless_error_message(response, "Paperless metadata create"))
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise RuntimeError("Paperless metadata create response was not valid JSON.") from exc
+
+    if not isinstance(payload, dict) or payload.get("id") is None:
+        raise RuntimeError("Paperless metadata create response had an unexpected shape.")
+    return {"id": payload.get("id"), "name": payload.get("name", normalized_name)}
+
+
+def _build_paperless_upload_form(metadata: dict | None) -> list[tuple[str, str]]:
+    if not metadata:
+        return []
+
+    form: list[tuple[str, str]] = []
+    scalar_mapping = {
+        "title": "title",
+        "document_date": "created",
+        "correspondent_id": "correspondent",
+        "document_type_id": "document_type",
+        "storage_path_id": "storage_path",
+    }
+    for source_key, paperless_key in scalar_mapping.items():
+        value = metadata.get(source_key)
+        if value not in (None, ""):
+            form.append((paperless_key, str(value)))
+
+    tag_ids = metadata.get("tag_ids") or []
+    if not isinstance(tag_ids, list):
+        raise RuntimeError("Pending tag metadata is invalid.")
+    for tag_id in tag_ids:
+        form.append(("tags", str(tag_id)))
+
+    return form
+
+
+def _upload_pdf_to_paperless(
+    pdf_path: Path,
+    page_count: int,
+    username: str | None = None,
+    metadata: dict | None = None,
+) -> dict:
+    if username is None:
+        raise RuntimeError("username is required for Paperless upload.")
 
     upload_url = _build_paperless_upload_url(username)
     page_based_timeout_seconds = _calculate_paperless_timeout_seconds(page_count, username)
@@ -1092,7 +1235,8 @@ def _upload_pdf_to_paperless(pdf_path: Path, page_count: int, username: str | No
         upload_timeout_seconds,
     )
 
-    headers = {"Authorization": f"Token {api_token}"}
+    headers = _paperless_headers(username)
+    form_data = _build_paperless_upload_form(metadata)
 
     response = None
     for attempt in range(1, _PAPERLESS_UPLOAD_MAX_ATTEMPTS + 1):
@@ -1101,6 +1245,7 @@ def _upload_pdf_to_paperless(pdf_path: Path, page_count: int, username: str | No
                 response = requests.post(
                     upload_url,
                     headers=headers,
+                    data=form_data,
                     files={"document": (pdf_path.name, pdf_file, "application/pdf")},
                     timeout=upload_timeout_seconds,
                 )
@@ -1218,59 +1363,45 @@ def _process_scan(
             )
 
         page_count = _convert_tiffs_to_pdf(tiff_paths, pdf_path)
-
-        if progress_callback is not None:
-            paperless_timeout_seconds = _calculate_paperless_timeout_seconds(
-                page_count, active_username
-            )
-            progress_callback(
-                {
-                    "status": "uploading",
-                    "message": f"Uploading {page_count} page(s) to Paperless-ngx...",
-                    "page_count": page_count,
-                    "paperless_timeout_seconds": paperless_timeout_seconds,
-                    "timeout_countdown_start_seconds": _TIMEOUT_COUNTDOWN_START_SECONDS,
-                }
-            )
-
-        paperless_started_at = time.monotonic()
-        paperless_response = _upload_pdf_to_paperless(pdf_path, page_count, active_username)
-        paperless_elapsed_seconds = time.monotonic() - paperless_started_at
+        pending = create_pending_document(
+            pdf_path,
+            username=active_username,
+            original_filename=output_filename,
+            page_count=page_count,
+            device_name=device_name,
+            title=normalized_filename_base,
+        )
 
     total_elapsed_seconds = time.monotonic() - total_started_at
     timing_metrics = _build_timing_metrics(
         total_elapsed_seconds,
         scan_elapsed_seconds,
-        paperless_elapsed_seconds,
+        0.0,
         page_count,
     )
-
-    document_id = paperless_response.get("id")
-    paperless_task_id = _extract_paperless_task_id(paperless_response)
-    message = f"Scan uploaded to Paperless-ngx. pages={page_count}"
     message = (
-        f"{message} total={timing_metrics['total_seconds']}s"
+        f"Scan saved to Pending. pages={page_count}"
+        f" pending_id={pending['id']}"
+        f" total={timing_metrics['total_seconds']}s"
         f" scan={timing_metrics['scan_seconds']}s"
-        f" paperless={timing_metrics['paperless_seconds']}s"
-        f" scan_per_page={timing_metrics['scan_seconds_per_page']}s"
-        f" paperless_per_page={timing_metrics['paperless_seconds_per_page']}s"
     )
-    if document_id is not None:
-        message = f"{message} document_id={document_id}"
 
     return {
         "status": "ok",
         "message": message,
         "filename_base": normalized_filename_base,
         "filename": output_filename,
-        "document_id": document_id,
+        "document_id": None,
         "page_count": page_count,
         "username": active_username,
         "device_name": device_name,
         "device_id": configured_device_id,
         "scanimage_device_name": scanimage_device_name,
         "timing_metrics": timing_metrics,
-        "paperless_task_id": paperless_task_id,
+        "paperless_task_id": None,
+        "pending_document_id": pending["id"],
+        "pending_state": pending["state"],
+        "review_url": f"/pending#{pending['id']}",
     }
 
 
@@ -1351,6 +1482,189 @@ def index():
         "index.html",
         resolved_username=_resolve_request_username(),
     )
+
+
+@app.get("/pending")
+@_auth_required
+def pending_page():
+    return render_template(
+        "pending.html",
+        resolved_username=_resolve_request_username(),
+    )
+
+
+@app.get("/api/pending")
+@_auth_required
+def api_list_pending():
+    username = _resolve_request_username()
+    include_submitted = request.args.get("include_submitted") == "1"
+    return jsonify(
+        {
+            "status": "ok",
+            "pending": list_pending_documents(
+                username,
+                include_submitted=include_submitted,
+            ),
+        }
+    ), 200
+
+
+@app.get("/api/pending/<pending_id>")
+@_auth_required
+def api_get_pending(pending_id: str):
+    try:
+        payload = get_pending_document(pending_id, _resolve_request_username())
+        return jsonify({"status": "ok", "pending": payload}), 200
+    except LookupError:
+        return jsonify({"status": "error", "message": "Pending document not found."}), 404
+
+
+@app.get("/api/pending/<pending_id>/file")
+@_auth_required
+def api_get_pending_file(pending_id: str):
+    try:
+        pdf_path, original_filename = resolve_pending_pdf_path(
+            pending_id,
+            _resolve_request_username(),
+        )
+    except LookupError:
+        return jsonify({"status": "error", "message": "Pending document not found."}), 404
+    except FileNotFoundError:
+        return jsonify({"status": "error", "message": "Pending PDF is missing."}), 410
+
+    as_attachment = request.args.get("download") == "1"
+    return send_file(
+        pdf_path,
+        mimetype="application/pdf",
+        as_attachment=as_attachment,
+        download_name=original_filename,
+        conditional=True,
+    )
+
+
+@app.patch("/api/pending/<pending_id>/metadata")
+@_auth_required
+def api_update_pending_metadata(pending_id: str):
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"status": "error", "message": "JSON object required."}), 400
+    try:
+        payload = update_pending_metadata(
+            pending_id,
+            _resolve_request_username(),
+            body,
+        )
+        return jsonify({"status": "ok", "pending": payload}), 200
+    except LookupError:
+        return jsonify({"status": "error", "message": "Pending document not found."}), 404
+    except (ValueError, RuntimeError) as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 400
+
+
+@app.get("/api/paperless/metadata")
+@_auth_required
+def api_get_paperless_metadata():
+    username = _resolve_request_username()
+    try:
+        payload = {
+            kind: _fetch_paperless_metadata_collection(kind, username)
+            for kind in _PAPERLESS_METADATA_ENDPOINTS
+        }
+        return jsonify({"status": "ok", **payload}), 200
+    except (ValueError, RuntimeError) as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 502
+
+
+@app.post("/api/paperless/metadata/<kind>")
+@_auth_required
+def api_create_paperless_metadata(kind: str):
+    body = request.get_json(silent=True) or {}
+    name = body.get("name")
+    if not isinstance(name, str):
+        return jsonify({"status": "error", "message": "name must be a string."}), 400
+    try:
+        created = _create_paperless_metadata_object(
+            kind,
+            name,
+            _resolve_request_username(),
+        )
+        return jsonify({"status": "ok", "item": created}), 201
+    except ValueError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 400
+    except RuntimeError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 502
+
+
+@app.post("/api/pending/<pending_id>/submit")
+@_auth_required
+def api_submit_pending(pending_id: str):
+    username = _resolve_request_username()
+    try:
+        pending = get_pending_document(
+            pending_id,
+            username,
+            include_pdf_path=True,
+        )
+    except LookupError:
+        return jsonify({"status": "error", "message": "Pending document not found."}), 404
+
+    if pending["state"] == "submitted":
+        return jsonify({"status": "error", "message": "Pending document is already submitted."}), 409
+    if pending["state"] == "submitting":
+        return jsonify({"status": "busy", "message": "Paperless ingestion is already in progress."}), 409
+
+    pdf_path = Path(pending["pdf_path"])
+    try:
+        response = _upload_pdf_to_paperless(
+            pdf_path,
+            int(pending["page_count"]),
+            username,
+            pending.get("metadata"),
+        )
+        task_id = _extract_paperless_task_id(response)
+        document_id = response.get("id")
+        if task_id:
+            updated = set_pending_submission_state(
+                pending_id,
+                username,
+                state="submitting",
+                task_id=task_id,
+            )
+        elif document_id is not None:
+            updated = set_pending_submission_state(
+                pending_id,
+                username,
+                state="submitted",
+                document_id=str(document_id),
+            )
+        else:
+            raise RuntimeError("Paperless upload returned no task or document identifier.")
+    except RuntimeError as exc:
+        set_pending_submission_state(
+            pending_id,
+            username,
+            state="failed",
+            error=str(exc),
+        )
+        return jsonify({"status": "error", "message": str(exc)}), 502
+
+    scan_payload = {
+        "status": "ok",
+        "username": username,
+        "paperless_task_id": task_id,
+        "filename": pending.get("original_filename"),
+        "device_name": pending.get("device_name"),
+    }
+    _register_recent_upload_from_scan_payload(scan_payload)
+
+    return jsonify(
+        {
+            "status": "ok",
+            "pending": updated,
+            "paperless_task_id": task_id,
+            "document_id": document_id,
+        }
+    ), 200
 
 
 @app.post("/api/scan")
@@ -1648,6 +1962,17 @@ def get_paperless_task_status(task_id: str):
                 "last_error": None,
                 "poll_failure_count": 0,
             },
+        )
+        apply_paperless_task_status(
+            username,
+            task_id,
+            task_status=task_status,
+            document_id=(
+                str(payload.get("related_document"))
+                if payload.get("related_document") is not None
+                else None
+            ),
+            result_text=payload.get("result"),
         )
         return jsonify(payload), 200
     except LookupError:
