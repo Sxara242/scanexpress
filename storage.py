@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _DEFAULT_DATA_DIR = "~/.local/share/scanexpress"
 
 
@@ -112,6 +112,42 @@ def _apply_schema_v2(connection: sqlite3.Connection) -> None:
     )
 
 
+def _apply_schema_v3(connection: sqlite3.Connection) -> None:
+    session_columns = _column_names(connection, "scan_sessions")
+    additions = {
+        "username": "TEXT NOT NULL DEFAULT ''",
+        "device_name": "TEXT",
+        "page_count": "INTEGER NOT NULL DEFAULT 0",
+        "item_count": "INTEGER NOT NULL DEFAULT 0",
+        "last_error": "TEXT",
+    }
+    for column_name, declaration in additions.items():
+        if column_name not in session_columns:
+            connection.execute(
+                f"ALTER TABLE scan_sessions ADD COLUMN {column_name} {declaration}"
+            )
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS scan_session_pages (
+            session_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL,
+            file_path TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (session_id, sequence),
+            FOREIGN KEY (session_id) REFERENCES scan_sessions(id) ON DELETE CASCADE
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_scan_sessions_one_open_per_user
+        ON scan_sessions(username)
+        WHERE state = 'open';
+
+        CREATE INDEX IF NOT EXISTS idx_scan_session_pages_session
+        ON scan_session_pages(session_id, sequence);
+        """
+    )
+
+
 def initialize_storage(data_dir: Path | None = None) -> StoragePaths:
     root = (data_dir or resolve_data_dir()).expanduser()
     pending = root / "pending"
@@ -142,6 +178,9 @@ def initialize_storage(data_dir: Path | None = None) -> StoragePaths:
         if 2 not in applied_versions:
             _apply_schema_v2(connection)
             connection.execute("INSERT INTO schema_migrations(version) VALUES (2)")
+        if 3 not in applied_versions:
+            _apply_schema_v3(connection)
+            connection.execute("INSERT INTO schema_migrations(version) VALUES (3)")
         connection.commit()
 
     try:
@@ -220,6 +259,8 @@ def create_pending_document(
     page_count: int,
     device_name: str | None = None,
     title: str | None = None,
+    session_id: str | None = None,
+    sequence: int = 1,
     paths: StoragePaths | None = None,
 ) -> dict:
     if not username.strip():
@@ -246,12 +287,14 @@ def create_pending_document(
         connection.execute(
             """
             INSERT INTO pending_documents(
-                id, state, pdf_path, page_count, username,
+                id, session_id, sequence, state, pdf_path, page_count, username,
                 original_filename, device_name
-            ) VALUES (?, 'ready', ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, 'ready', ?, ?, ?, ?, ?)
             """,
             (
                 pending_id,
+                session_id,
+                sequence,
                 str(target_path),
                 page_count,
                 username,
@@ -507,6 +550,437 @@ def resolve_pending_pdf_path(
     if not pdf_path.is_file():
         raise FileNotFoundError("Pending PDF is missing.")
     return pdf_path, payload.get("original_filename") or f"{pending_id}.pdf"
+
+
+def _row_to_session(row: sqlite3.Row) -> dict:
+    payload = dict(row)
+    mode = payload.get("mode")
+    state = payload.get("state")
+    if state == "open" and mode == "document":
+        payload["logical_state"] = "DOCUMENT_OPEN"
+    elif state == "open" and mode == "batch":
+        payload["logical_state"] = "BATCH_OPEN"
+    elif state == "completed":
+        payload["logical_state"] = "IDLE"
+    else:
+        payload["logical_state"] = str(state).upper()
+    return payload
+
+
+def get_active_scan_session(
+    username: str,
+    *,
+    paths: StoragePaths | None = None,
+) -> dict | None:
+    connection, _ = _connect(paths)
+    try:
+        row = connection.execute(
+            """
+            SELECT * FROM scan_sessions
+            WHERE username = ? AND state = 'open'
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (username,),
+        ).fetchone()
+        return _row_to_session(row) if row is not None else None
+    finally:
+        connection.close()
+
+
+def get_scan_session(
+    session_id: str,
+    username: str,
+    *,
+    paths: StoragePaths | None = None,
+) -> dict:
+    connection, _ = _connect(paths)
+    try:
+        row = connection.execute(
+            "SELECT * FROM scan_sessions WHERE id = ? AND username = ?",
+            (session_id, username),
+        ).fetchone()
+        if row is None:
+            raise LookupError("Scan session not found.")
+        return _row_to_session(row)
+    finally:
+        connection.close()
+
+
+def ensure_scan_session(
+    username: str,
+    mode: str,
+    *,
+    device_name: str | None = None,
+    paths: StoragePaths | None = None,
+) -> dict:
+    if mode not in {"document", "batch"}:
+        raise ValueError("mode must be 'document' or 'batch'.")
+    if not username.strip():
+        raise ValueError("username is required.")
+
+    connection, resolved_paths = _connect(paths)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        existing = connection.execute(
+            "SELECT * FROM scan_sessions WHERE username = ? AND state = 'open' LIMIT 1",
+            (username,),
+        ).fetchone()
+        if existing is not None:
+            if existing["mode"] != mode:
+                raise RuntimeError(
+                    f"{existing['mode'].capitalize()} session is already open; finish it first."
+                )
+            if (
+                device_name
+                and existing["device_name"]
+                and existing["device_name"] != device_name
+            ):
+                raise RuntimeError(
+                    "The open scan session belongs to a different scanner device."
+                )
+            connection.commit()
+            return _row_to_session(existing)
+
+        session_id = uuid.uuid4().hex
+        connection.execute(
+            """
+            INSERT INTO scan_sessions(
+                id, mode, state, username, device_name, page_count, item_count
+            ) VALUES (?, ?, 'open', ?, ?, 0, 0)
+            """,
+            (session_id, mode, username, device_name),
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+    _ensure_private_directory(resolved_paths.working / session_id)
+    return get_scan_session(session_id, username, paths=resolved_paths)
+
+
+def append_document_page(
+    session_id: str,
+    username: str,
+    source_page_path: Path,
+    *,
+    paths: StoragePaths | None = None,
+) -> dict:
+    if not source_page_path.is_file() or source_page_path.stat().st_size == 0:
+        raise ValueError("Captured page is missing or empty.")
+
+    connection, resolved_paths = _connect(paths)
+    target_path: Path | None = None
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            """
+            SELECT * FROM scan_sessions
+            WHERE id = ? AND username = ? AND state = 'open'
+            """,
+            (session_id, username),
+        ).fetchone()
+        if row is None:
+            raise LookupError("Open scan session not found.")
+        if row["mode"] != "document":
+            raise RuntimeError("Pages can only be appended to a document session.")
+
+        sequence = int(row["page_count"]) + 1
+        session_dir = resolved_paths.working / session_id
+        _ensure_private_directory(session_dir)
+        suffix = source_page_path.suffix.lower() or ".tiff"
+        target_path = session_dir / f"page-{sequence:04d}{suffix}"
+        shutil.move(str(source_page_path), str(target_path))
+        try:
+            target_path.chmod(0o600)
+        except OSError:
+            pass
+
+        connection.execute(
+            """
+            INSERT INTO scan_session_pages(session_id, sequence, file_path)
+            VALUES (?, ?, ?)
+            """,
+            (session_id, sequence, str(target_path)),
+        )
+        connection.execute(
+            """
+            UPDATE scan_sessions
+            SET page_count = ?, last_error = NULL, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (sequence, session_id),
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        if target_path is not None:
+            try:
+                target_path.unlink()
+            except FileNotFoundError:
+                pass
+        raise
+    finally:
+        connection.close()
+
+    return get_scan_session(session_id, username, paths=resolved_paths)
+
+
+def list_document_page_paths(
+    session_id: str,
+    username: str,
+    *,
+    paths: StoragePaths | None = None,
+) -> list[Path]:
+    connection, _ = _connect(paths)
+    try:
+        session_row = connection.execute(
+            """
+            SELECT mode FROM scan_sessions
+            WHERE id = ? AND username = ? AND state = 'open'
+            """,
+            (session_id, username),
+        ).fetchone()
+        if session_row is None:
+            raise LookupError("Open scan session not found.")
+        if session_row["mode"] != "document":
+            raise RuntimeError("Session is not a document session.")
+        rows = connection.execute(
+            """
+            SELECT file_path FROM scan_session_pages
+            WHERE session_id = ?
+            ORDER BY sequence
+            """,
+            (session_id,),
+        ).fetchall()
+        return [Path(row["file_path"]) for row in rows]
+    finally:
+        connection.close()
+
+
+def attach_pending_to_batch_session(
+    pending_id: str,
+    session_id: str,
+    username: str,
+    *,
+    paths: StoragePaths | None = None,
+) -> dict:
+    connection, resolved_paths = _connect(paths)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        session_row = connection.execute(
+            """
+            SELECT * FROM scan_sessions
+            WHERE id = ? AND username = ? AND state = 'open'
+            """,
+            (session_id, username),
+        ).fetchone()
+        if session_row is None:
+            raise LookupError("Open scan session not found.")
+        if session_row["mode"] != "batch":
+            raise RuntimeError("Pending items can only be attached to a batch session.")
+
+        pending_row = connection.execute(
+            """
+            SELECT id FROM pending_documents
+            WHERE id = ? AND username = ? AND session_id IS NULL
+            """,
+            (pending_id, username),
+        ).fetchone()
+        if pending_row is None:
+            raise LookupError("Unattached Pending document not found.")
+
+        sequence = int(session_row["item_count"]) + 1
+        connection.execute(
+            """
+            UPDATE pending_documents
+            SET session_id = ?, sequence = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (session_id, sequence, pending_id),
+        )
+        connection.execute(
+            """
+            UPDATE scan_sessions
+            SET item_count = ?, last_error = NULL, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (sequence, session_id),
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+    return get_pending_document(pending_id, username, paths=resolved_paths)
+
+
+def complete_scan_session(
+    session_id: str,
+    username: str,
+    *,
+    paths: StoragePaths | None = None,
+) -> dict:
+    connection, resolved_paths = _connect(paths)
+    try:
+        cursor = connection.execute(
+            """
+            UPDATE scan_sessions
+            SET state = 'completed', last_error = NULL, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND username = ? AND state = 'open'
+            """,
+            (session_id, username),
+        )
+        if cursor.rowcount == 0:
+            raise LookupError("Open scan session not found.")
+        connection.commit()
+    finally:
+        connection.close()
+    return get_scan_session(session_id, username, paths=resolved_paths)
+
+
+def record_scan_session_error(
+    session_id: str,
+    username: str,
+    error: str,
+    *,
+    paths: StoragePaths | None = None,
+) -> dict:
+    connection, resolved_paths = _connect(paths)
+    try:
+        cursor = connection.execute(
+            """
+            UPDATE scan_sessions
+            SET last_error = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND username = ? AND state = 'open'
+            """,
+            (error, session_id, username),
+        )
+        if cursor.rowcount == 0:
+            raise LookupError("Open scan session not found.")
+        connection.commit()
+    finally:
+        connection.close()
+    return get_scan_session(session_id, username, paths=resolved_paths)
+
+
+def cleanup_document_session_pages(
+    session_id: str,
+    username: str,
+    *,
+    paths: StoragePaths | None = None,
+) -> None:
+    connection, resolved_paths = _connect(paths)
+    try:
+        session_row = connection.execute(
+            "SELECT id FROM scan_sessions WHERE id = ? AND username = ?",
+            (session_id, username),
+        ).fetchone()
+        if session_row is None:
+            raise LookupError("Scan session not found.")
+        rows = connection.execute(
+            "SELECT file_path FROM scan_session_pages WHERE session_id = ?",
+            (session_id,),
+        ).fetchall()
+        connection.execute(
+            "DELETE FROM scan_session_pages WHERE session_id = ?",
+            (session_id,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    for row in rows:
+        try:
+            Path(row["file_path"]).unlink()
+        except FileNotFoundError:
+            pass
+    session_dir = resolved_paths.working / session_id
+    try:
+        session_dir.rmdir()
+    except OSError:
+        pass
+
+
+def apply_pending_metadata_scope(
+    pending_id: str,
+    username: str,
+    *,
+    scope: str,
+    paths: StoragePaths | None = None,
+) -> int:
+    if scope not in {"remaining", "all"}:
+        raise ValueError("scope must be 'remaining' or 'all'.")
+
+    connection, _ = _connect(paths)
+    try:
+        source = connection.execute(
+            """
+            SELECT p.session_id, p.sequence, m.document_date, m.correspondent_id,
+                   m.document_type_id, m.storage_path_id, m.tag_ids_json
+            FROM pending_documents p
+            JOIN pending_metadata m ON m.pending_document_id = p.id
+            WHERE p.id = ? AND p.username = ?
+            """,
+            (pending_id, username),
+        ).fetchone()
+        if source is None:
+            raise LookupError("Pending document not found.")
+        if source["session_id"] is None:
+            raise RuntimeError("Apply-to-batch requires a Batch session item.")
+
+        if scope == "remaining":
+            target_rows = connection.execute(
+                """
+                SELECT id FROM pending_documents
+                WHERE username = ? AND session_id = ? AND sequence > ?
+                  AND state IN ('ready', 'failed')
+                ORDER BY sequence
+                """,
+                (username, source["session_id"], source["sequence"]),
+            ).fetchall()
+        else:
+            target_rows = connection.execute(
+                """
+                SELECT id FROM pending_documents
+                WHERE username = ? AND session_id = ?
+                  AND state IN ('ready', 'failed')
+                ORDER BY sequence
+                """,
+                (username, source["session_id"]),
+            ).fetchall()
+
+        target_ids = [row["id"] for row in target_rows]
+        for target_id in target_ids:
+            connection.execute(
+                """
+                UPDATE pending_metadata
+                SET document_date = ?, correspondent_id = ?, document_type_id = ?,
+                    storage_path_id = ?, tag_ids_json = ?
+                WHERE pending_document_id = ?
+                """,
+                (
+                    source["document_date"],
+                    source["correspondent_id"],
+                    source["document_type_id"],
+                    source["storage_path_id"],
+                    source["tag_ids_json"],
+                    target_id,
+                ),
+            )
+            connection.execute(
+                "UPDATE pending_documents SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (target_id,),
+            )
+        connection.commit()
+        return len(target_ids)
+    finally:
+        connection.close()
 
 
 def _main() -> int:

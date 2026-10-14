@@ -318,6 +318,137 @@ test("scan is saved as Pending, reviewed, and explicitly submitted", async ({ pa
   await expect(page.locator("#pendingStatus")).toContainText("Document ID: 4242");
 });
 
+test("Document session keeps pages until Finish and creates one Pending PDF", async ({ request }) => {
+  const first = await request.post("/api/scan-session/document-page", {
+    data: { device_name: "flatbed" },
+  });
+  expect(first.ok()).toBeTruthy();
+  let payload = await first.json();
+  expect(payload.session.logical_state).toBe("DOCUMENT_OPEN");
+  expect(payload.session.page_count).toBe(1);
+
+  const second = await request.post("/api/scan-session/document-page", {
+    data: { device_name: "flatbed" },
+  });
+  expect(second.ok()).toBeTruthy();
+  payload = await second.json();
+  expect(payload.session.logical_state).toBe("DOCUMENT_OPEN");
+  expect(payload.session.page_count).toBe(2);
+
+  const beforeFinish = await request.get("/api/scan-session");
+  const beforePayload = await beforeFinish.json();
+  expect(beforePayload.logical_state).toBe("DOCUMENT_OPEN");
+
+  const finish = await request.post("/api/scan-session/finish", {
+    data: { filename_base: "two-page-document" },
+  });
+  expect(finish.ok()).toBeTruthy();
+  const finishPayload = await finish.json();
+  expect(finishPayload.logical_state).toBe("IDLE");
+  expect(finishPayload.page_count).toBe(2);
+  expect(finishPayload.pending.page_count).toBe(2);
+
+  const afterFinish = await request.get("/api/scan-session");
+  const afterPayload = await afterFinish.json();
+  expect(afterPayload.logical_state).toBe("IDLE");
+  expect(afterPayload.session).toBeNull();
+
+  const pending = await request.get("/api/pending");
+  const pendingPayload = await pending.json();
+  expect(pendingPayload.pending).toHaveLength(1);
+  expect(pendingPayload.pending[0].page_count).toBe(2);
+  expect(pendingPayload.pending[0].metadata.title).toBe("two-page-document");
+});
+
+test("Batch session creates independent Pending items and applies shared metadata", async ({ request }) => {
+  const first = await request.post("/api/scan-session/batch-item", {
+    data: { device_name: "flatbed" },
+  });
+  expect(first.ok()).toBeTruthy();
+  const firstPayload = await first.json();
+  expect(firstPayload.session.logical_state).toBe("BATCH_OPEN");
+  expect(firstPayload.pending.sequence).toBe(1);
+
+  const second = await request.post("/api/scan-session/batch-item", {
+    data: { device_name: "flatbed" },
+  });
+  expect(second.ok()).toBeTruthy();
+  const secondPayload = await second.json();
+  expect(secondPayload.session.item_count).toBe(2);
+  expect(secondPayload.pending.sequence).toBe(2);
+  expect(secondPayload.pending.id).not.toBe(firstPayload.pending.id);
+  expect(secondPayload.pending.session_id).toBe(firstPayload.pending.session_id);
+
+  const firstId = firstPayload.pending.id;
+  const secondId = secondPayload.pending.id;
+
+  const firstMetadataResponse = await request.patch(`/api/pending/${firstId}/metadata`, {
+    data: {
+      title: "Photo one",
+      document_date: "2026-10-14",
+      document_type_id: 11,
+      correspondent_id: 21,
+      storage_path_id: 31,
+      tag_ids: [1, 2],
+    },
+  });
+  expect(firstMetadataResponse.ok()).toBeTruthy();
+
+  const secondMetadataResponse = await request.patch(`/api/pending/${secondId}/metadata`, {
+    data: {
+      title: "Photo two",
+      document_date: null,
+      document_type_id: null,
+      correspondent_id: null,
+      storage_path_id: null,
+      tag_ids: [],
+    },
+  });
+  expect(secondMetadataResponse.ok()).toBeTruthy();
+
+  const apply = await request.post(`/api/pending/${firstId}/apply-metadata`, {
+    data: { scope: "remaining" },
+  });
+  expect(apply.ok()).toBeTruthy();
+  const applyPayload = await apply.json();
+  expect(applyPayload.updated_count).toBe(1);
+
+  const secondAfter = await request.get(`/api/pending/${secondId}`);
+  const secondAfterPayload = await secondAfter.json();
+  expect(secondAfterPayload.pending.metadata.title).toBe("Photo two");
+  expect(secondAfterPayload.pending.metadata.document_type_id).toBe(11);
+  expect(secondAfterPayload.pending.metadata.tag_ids).toEqual([1, 2]);
+
+  const finish = await request.post("/api/scan-session/finish", { data: {} });
+  expect(finish.ok()).toBeTruthy();
+  const finishPayload = await finish.json();
+  expect(finishPayload.logical_state).toBe("IDLE");
+  expect(finishPayload.item_count).toBe(2);
+
+  const pending = await request.get("/api/pending");
+  const pendingPayload = await pending.json();
+  expect(pendingPayload.pending).toHaveLength(2);
+  const sequences = pendingPayload.pending.map((item) => item.sequence).sort();
+  expect(sequences).toEqual([1, 2]);
+});
+
+test("scan session rejects switching between Document and Batch before Finish", async ({ request }) => {
+  const document = await request.post("/api/scan-session/document-page", {
+    data: { device_name: "flatbed" },
+  });
+  expect(document.ok()).toBeTruthy();
+
+  const batch = await request.post("/api/scan-session/batch-item", {
+    data: { device_name: "flatbed" },
+  });
+  expect(batch.status()).toBe(409);
+  const batchPayload = await batch.json();
+  expect(batchPayload.message).toContain("Document session is already open");
+
+  const finish = await request.post("/api/scan-session/finish", { data: {} });
+  expect(finish.ok()).toBeTruthy();
+});
+
 test("recent uploads shows task polling transition and success document link", async ({ page }) => {
   let pollCount = 0;
 
