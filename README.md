@@ -29,6 +29,8 @@ fails closed when it is missing.
 Captured Pending documents and the SQLite state database belong in the
 configured data directory, never in the Git working tree.
 
+Phase work is developed on feature branches and merged only after CI passes.
+
 ## Server Installation
 
 Use this section for one-time server setup. Use the development guide for iterative update workflows.
