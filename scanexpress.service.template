@@ -1,5 +1,5 @@
 [Unit]
-Description=ScanExpress Flask Service
+Description=ScanExpress Scanner Manager
 After=network.target
 
 [Service]
@@ -7,11 +7,19 @@ Type=simple
 User=scanexpress
 Group=scanexpress
 WorkingDirectory=/opt/scanexpress
-# Optional override when config.ini is not in the default location:
-# Environment="SCANEXPRESS_CONFIG_FILE=/etc/scanexpress.conf"
-ExecStart=/opt/scanexpress/.venv/bin/python /opt/scanexpress/app.py
+Environment="SCANEXPRESS_CONFIG_FILE=/etc/scanexpress.conf"
+Environment="SCANEXPRESS_DATA_DIR=/var/lib/scanexpress"
+# Secure cookies are correct when the browser reaches ScanExpress over HTTPS
+# (for example through Tailscale Serve). Set to 0 only for an intentional
+# plain-HTTP deployment.
+Environment="SCANEXPRESS_SECURE_COOKIES=1"
+ExecStartPre=/opt/scanexpress/.venv/bin/python -m storage init
+ExecStart=/opt/scanexpress/.venv/bin/gunicorn --workers 1 --threads 4 --bind 127.0.0.1:8000 --access-logfile - --error-logfile - wsgi:app
 Restart=on-failure
 RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
