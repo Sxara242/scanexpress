@@ -17,10 +17,19 @@ from flask import Flask, Response, jsonify, render_template, request, send_file,
 from flask_login import LoginManager, UserMixin, current_user, login_user, logout_user
 from config import ConfigManager
 from storage import (
+    append_document_page,
     apply_paperless_task_status,
+    apply_pending_metadata_scope,
+    attach_pending_to_batch_session,
+    cleanup_document_session_pages,
+    complete_scan_session,
     create_pending_document,
+    ensure_scan_session,
+    get_active_scan_session,
     get_pending_document,
+    list_document_page_paths,
     list_pending_documents,
+    record_scan_session_error,
     resolve_pending_pdf_path,
     set_pending_submission_state,
     update_pending_metadata,
@@ -1484,6 +1493,178 @@ def index():
     )
 
 
+def _capture_session_item(
+    mode: str,
+    *,
+    requested_device_name: str | None = None,
+    username: str | None = None,
+) -> dict:
+    if mode not in {"document", "batch"}:
+        raise ValueError("Unsupported scan session mode.")
+
+    config_manager = get_config_manager()
+    active_username = username or _resolve_request_username()
+    device_name = _resolve_requested_device_name(
+        config_manager,
+        active_username,
+        requested_device_name,
+    )
+    configured_device_id, scanimage_device_name = _resolve_scan_device_details(
+        active_username,
+        device_name,
+    )
+    device_lock_id = _resolve_scan_lock_device_id(
+        active_username,
+        device_name,
+        configured_device_id,
+        scanimage_device_name,
+    )
+
+    _acquire_device_scan_lock(device_lock_id, active_username, device_name)
+    scan_session = None
+    try:
+        scan_session = ensure_scan_session(
+            active_username,
+            mode,
+            device_name=device_name,
+        )
+        with tempfile.TemporaryDirectory(prefix="scanexpress-session-") as working_dir:
+            working_dir_path = Path(working_dir)
+            batch_output_pattern = working_dir_path / "scan_output%d.tiff"
+            tiff_paths = _run_scan_command(
+                batch_output_pattern,
+                None,
+                active_username,
+                device_name,
+            )
+
+            if mode == "document":
+                for tiff_path in tiff_paths:
+                    scan_session = append_document_page(
+                        scan_session["id"],
+                        active_username,
+                        tiff_path,
+                    )
+                return {
+                    "status": "ok",
+                    "action": "document-page",
+                    "session": scan_session,
+                    "pages_added": len(tiff_paths),
+                }
+
+            filename_base = _build_default_filename_base(config_manager)
+            output_filename = f"{filename_base}.pdf"
+            pdf_path = working_dir_path / output_filename
+            page_count = _convert_tiffs_to_pdf(tiff_paths, pdf_path)
+            pending = create_pending_document(
+                pdf_path,
+                username=active_username,
+                original_filename=output_filename,
+                page_count=page_count,
+                device_name=device_name,
+                title=filename_base,
+            )
+            pending = attach_pending_to_batch_session(
+                pending["id"],
+                scan_session["id"],
+                active_username,
+            )
+            scan_session = get_active_scan_session(active_username)
+            return {
+                "status": "ok",
+                "action": "batch-item",
+                "session": scan_session,
+                "pending": pending,
+            }
+    except Exception as exc:
+        if scan_session is not None:
+            try:
+                record_scan_session_error(
+                    scan_session["id"],
+                    active_username,
+                    str(exc),
+                )
+            except Exception:
+                app.logger.exception("Failed to record scan session error")
+        raise
+    finally:
+        _release_device_scan_lock(device_lock_id)
+
+
+def _finish_active_scan_session(
+    *,
+    username: str | None = None,
+    filename_base: str | None = None,
+) -> dict:
+    active_username = username or _resolve_request_username()
+    scan_session = get_active_scan_session(active_username)
+    if scan_session is None:
+        return {
+            "status": "ok",
+            "action": "finish",
+            "logical_state": "IDLE",
+            "message": "No open scan session.",
+            "pending": None,
+        }
+
+    if scan_session["mode"] == "batch":
+        completed = complete_scan_session(scan_session["id"], active_username)
+        return {
+            "status": "ok",
+            "action": "finish",
+            "logical_state": "IDLE",
+            "session": completed,
+            "item_count": int(completed["item_count"]),
+            "pending": None,
+        }
+
+    page_paths = list_document_page_paths(scan_session["id"], active_username)
+    if not page_paths:
+        completed = complete_scan_session(scan_session["id"], active_username)
+        cleanup_document_session_pages(scan_session["id"], active_username)
+        return {
+            "status": "ok",
+            "action": "finish",
+            "logical_state": "IDLE",
+            "session": completed,
+            "page_count": 0,
+            "pending": None,
+        }
+
+    config_manager = get_config_manager()
+    normalized_filename_base = _normalize_filename_base(filename_base, config_manager)
+    output_filename = f"{normalized_filename_base}.pdf"
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="scanexpress-session-finish-") as working_dir:
+            pdf_path = Path(working_dir) / output_filename
+            page_count = _convert_tiffs_to_pdf(page_paths, pdf_path)
+            pending = create_pending_document(
+                pdf_path,
+                username=active_username,
+                original_filename=output_filename,
+                page_count=page_count,
+                device_name=scan_session.get("device_name"),
+                title=normalized_filename_base,
+                session_id=scan_session["id"],
+                sequence=1,
+            )
+        completed = complete_scan_session(scan_session["id"], active_username)
+        cleanup_document_session_pages(scan_session["id"], active_username)
+    except Exception as exc:
+        record_scan_session_error(scan_session["id"], active_username, str(exc))
+        raise
+
+    return {
+        "status": "ok",
+        "action": "finish",
+        "logical_state": "IDLE",
+        "session": completed,
+        "page_count": page_count,
+        "pending": pending,
+    }
+
+
 @app.get("/pending")
 @_auth_required
 def pending_page():
@@ -1555,6 +1736,32 @@ def api_update_pending_metadata(pending_id: str):
             body,
         )
         return jsonify({"status": "ok", "pending": payload}), 200
+    except LookupError:
+        return jsonify({"status": "error", "message": "Pending document not found."}), 404
+    except (ValueError, RuntimeError) as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 400
+
+
+@app.post("/api/pending/<pending_id>/apply-metadata")
+@_auth_required
+def api_apply_pending_metadata(pending_id: str):
+    body = request.get_json(silent=True) or {}
+    scope = body.get("scope")
+    if scope not in {"remaining", "all"}:
+        return jsonify({"status": "error", "message": "scope must be 'remaining' or 'all'."}), 400
+    try:
+        updated_count = apply_pending_metadata_scope(
+            pending_id,
+            _resolve_request_username(),
+            scope=scope,
+        )
+        return jsonify(
+            {
+                "status": "ok",
+                "scope": scope,
+                "updated_count": updated_count,
+            }
+        ), 200
     except LookupError:
         return jsonify({"status": "error", "message": "Pending document not found."}), 404
     except (ValueError, RuntimeError) as exc:
@@ -1665,6 +1872,89 @@ def api_submit_pending(pending_id: str):
             "document_id": document_id,
         }
     ), 200
+
+
+@app.get("/api/scan-session")
+@_auth_required
+def api_get_scan_session():
+    scan_session = get_active_scan_session(_resolve_request_username())
+    return jsonify(
+        {
+            "status": "ok",
+            "logical_state": (
+                scan_session["logical_state"] if scan_session is not None else "IDLE"
+            ),
+            "session": scan_session,
+        }
+    ), 200
+
+
+@app.post("/api/scan-session/document-page")
+@_auth_required
+def api_scan_session_document_page():
+    body = request.get_json(silent=True) or {}
+    requested_device_name = body.get("device_name")
+    if requested_device_name is not None and not isinstance(requested_device_name, str):
+        return jsonify({"status": "error", "message": "device_name must be a string."}), 400
+    try:
+        payload = _capture_session_item(
+            "document",
+            requested_device_name=requested_device_name,
+            username=_resolve_request_username(),
+        )
+        return jsonify(payload), 200
+    except ScanInProgressError as exc:
+        return jsonify({"status": "busy", "message": str(exc)}), 409
+    except (ValueError, RuntimeError) as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 409
+    except Exception:
+        app.logger.exception("Unexpected error while capturing document session page")
+        return jsonify({"status": "error", "message": "Unexpected scan session error."}), 500
+
+
+@app.post("/api/scan-session/batch-item")
+@_auth_required
+def api_scan_session_batch_item():
+    body = request.get_json(silent=True) or {}
+    requested_device_name = body.get("device_name")
+    if requested_device_name is not None and not isinstance(requested_device_name, str):
+        return jsonify({"status": "error", "message": "device_name must be a string."}), 400
+    try:
+        payload = _capture_session_item(
+            "batch",
+            requested_device_name=requested_device_name,
+            username=_resolve_request_username(),
+        )
+        return jsonify(payload), 200
+    except ScanInProgressError as exc:
+        return jsonify({"status": "busy", "message": str(exc)}), 409
+    except (ValueError, RuntimeError) as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 409
+    except Exception:
+        app.logger.exception("Unexpected error while capturing batch session item")
+        return jsonify({"status": "error", "message": "Unexpected scan session error."}), 500
+
+
+@app.post("/api/scan-session/finish")
+@_auth_required
+def api_finish_scan_session():
+    body = request.get_json(silent=True) or {}
+    filename_base = body.get("filename_base")
+    if filename_base is not None and not isinstance(filename_base, str):
+        return jsonify({"status": "error", "message": "filename_base must be a string."}), 400
+    if isinstance(filename_base, str) and _is_empty_filename_input(filename_base):
+        return jsonify({"status": "error", "message": "Filename cannot be empty"}), 400
+    try:
+        payload = _finish_active_scan_session(
+            username=_resolve_request_username(),
+            filename_base=filename_base,
+        )
+        return jsonify(payload), 200
+    except (ValueError, RuntimeError, LookupError) as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 400
+    except Exception:
+        app.logger.exception("Unexpected error while finishing scan session")
+        return jsonify({"status": "error", "message": "Unexpected scan session error."}), 500
 
 
 @app.post("/api/scan")
