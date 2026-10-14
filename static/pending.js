@@ -18,6 +18,8 @@ const tagsSelect = document.getElementById("pendingTags");
 const previousButton = document.getElementById("previousPendingButton");
 const nextButton = document.getElementById("nextPendingButton");
 const submitButton = document.getElementById("submitPendingButton");
+const applyRemainingButton = document.getElementById("applyRemainingButton");
+const applyAllButton = document.getElementById("applyAllButton");
 const statusElement = document.getElementById("pendingStatus");
 
 let pendingItems = [];
@@ -41,6 +43,21 @@ function selectedItem() {
 
 function selectedIndex() {
   return pendingItems.findIndex((item) => item.id === selectedId);
+}
+
+function selectedGroup() {
+  const item = selectedItem();
+  if (!item?.session_id) {
+    return item ? [item] : [];
+  }
+  return pendingItems
+    .filter((entry) => entry.session_id === item.session_id)
+    .sort((left, right) => Number(left.sequence) - Number(right.sequence));
+}
+
+function selectedGroupIndex() {
+  const group = selectedGroup();
+  return group.findIndex((item) => item.id === selectedId);
 }
 
 function optionLabel(item) {
@@ -118,6 +135,8 @@ function renderQueue() {
 function renderSelected() {
   const item = selectedItem();
   const index = selectedIndex();
+  const group = selectedGroup();
+  const groupIndex = selectedGroupIndex();
 
   if (!item) {
     emptyState.hidden = false;
@@ -127,7 +146,9 @@ function renderSelected() {
 
   emptyState.hidden = true;
   review.hidden = false;
-  positionLabel.textContent = `${index + 1} / ${pendingItems.length}`;
+  positionLabel.textContent = group.length > 1
+    ? `${groupIndex + 1} / ${group.length} in batch`
+    : `${index + 1} / ${pendingItems.length}`;
   stateBadge.textContent = item.state;
   stateBadge.dataset.state = item.state;
   preview.src = `${item.file_url}#toolbar=1&navpanes=0`;
@@ -141,10 +162,13 @@ function renderSelected() {
   fillSingleSelect(storageSelect, metadataOptions.storage_paths, item.metadata?.storage_path_id);
   fillTags(metadataOptions.tags, item.metadata?.tag_ids || []);
 
-  previousButton.disabled = index <= 0;
-  nextButton.disabled = index < 0 || index >= pendingItems.length - 1;
+  previousButton.disabled = groupIndex <= 0;
+  nextButton.disabled = groupIndex < 0 || groupIndex >= group.length - 1;
   const locked = item.state === "submitted" || item.state === "submitting";
+  const isBatchGroup = Boolean(item.session_id) && group.length > 1;
   submitButton.disabled = locked;
+  applyRemainingButton.disabled = locked || !isBatchGroup || groupIndex >= group.length - 1;
+  applyAllButton.disabled = locked || !isBatchGroup;
   form.querySelectorAll("input, select").forEach((control) => {
     control.disabled = locked;
   });
@@ -258,6 +282,29 @@ async function saveMetadata() {
   render();
   return payload.pending;
 }
+
+async function applyMetadataScope(scope) {
+  const item = selectedItem();
+  if (!item) return;
+
+  setStatus("Saving metadata…");
+  await saveMetadata();
+  setStatus(scope === "remaining" ? "Applying metadata to remaining items…" : "Applying metadata to batch…");
+
+  const response = await fetch(`/api/pending/${item.id}/apply-metadata`, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({scope}),
+  });
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload?.message || "Failed to apply batch metadata.");
+  }
+
+  await loadPending(item.id);
+  setStatus(`Metadata applied to ${payload.updated_count} item(s). Titles were left unchanged.`);
+}
+
 
 async function submitSelected() {
   const item = selectedItem();
@@ -386,14 +433,32 @@ refreshButton.addEventListener("click", async () => {
 });
 
 previousButton.addEventListener("click", () => {
-  const index = selectedIndex();
-  if (index > 0) selectPending(pendingItems[index - 1].id);
+  const group = selectedGroup();
+  const index = selectedGroupIndex();
+  if (index > 0) selectPending(group[index - 1].id);
 });
 
 nextButton.addEventListener("click", () => {
-  const index = selectedIndex();
-  if (index >= 0 && index < pendingItems.length - 1) {
-    selectPending(pendingItems[index + 1].id);
+  const group = selectedGroup();
+  const index = selectedGroupIndex();
+  if (index >= 0 && index < group.length - 1) {
+    selectPending(group[index + 1].id);
+  }
+});
+
+applyRemainingButton.addEventListener("click", async () => {
+  try {
+    await applyMetadataScope("remaining");
+  } catch (error) {
+    setStatus(error.message || "Failed to apply metadata.", true);
+  }
+});
+
+applyAllButton.addEventListener("click", async () => {
+  try {
+    await applyMetadataScope("all");
+  } catch (error) {
+    setStatus(error.message || "Failed to apply metadata.", true);
   }
 });
 
