@@ -15,6 +15,22 @@ For local development setup, Playwright e2e smoke tests, and iterative deploymen
 
 For current production UI requirements and acceptance criteria, see [docs/UI_FINALIZATION_SPEC.md](docs/UI_FINALIZATION_SPEC.md).
 
+## Scanner Manager fork status
+
+This fork is evolving ScanExpress into the physical-button and Pending-review
+workflow described in `docs/SCANNER_MANAGER_MASTER_SPEC.md`.
+
+The reference production deployment uses a systemd-managed Gunicorn process
+bound to loopback. The service template initializes persistent state under
+`/var/lib/scanexpress` before startup. Set a real `secret_key` (or
+`SCANEXPRESS_SECRET_KEY`) before production startup; the WSGI entry point
+fails closed when it is missing.
+
+Captured Pending documents and the SQLite state database belong in the
+configured data directory, never in the Git working tree.
+
+Phase work is developed on feature branches and merged only after CI passes.
+
 ## Server Installation
 
 Use this section for one-time server setup. Use the development guide for iterative update workflows.
@@ -23,12 +39,12 @@ Prerequisites:
 
 - Server has scanner drivers/tools installed and can run `scanimage`.
 - Python 3 with venv support is available.
-- `python3-pil` package is installed on the server.
+- Pillow is installed through `requirements.txt`; a system `python3-pil` package is not required for the venv.
 
 Install required system packages:
 
     sudo apt update
-    sudo apt install -y python3-venv python3-pil
+    sudo apt install -y python3-venv
 
 One-time app install:
 

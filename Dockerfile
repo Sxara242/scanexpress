@@ -15,6 +15,10 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 COPY . .
 
+ENV SCANEXPRESS_DATA_DIR=/data
+
+VOLUME ["/data"]
+
 EXPOSE 8000
 
-CMD ["flask", "--app", "app", "run", "--host=0.0.0.0", "--port=8000"]
+CMD ["gunicorn", "--workers", "1", "--threads", "4", "--bind", "0.0.0.0:8000", "--access-logfile", "-", "--error-logfile", "-", "wsgi:app"]
