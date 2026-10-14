@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Pending scans - ScanExpress</title>
+    <link rel="stylesheet" href="/static/app.css" />
+    <link rel="stylesheet" href="/static/pending.css" />
+  </head>
+  <body>
+    <main class="app-shell pending-shell">
+      <header class="app-header">
+        <div class="app-header-main">
+          <h1>Pending scans</h1>
+          <p class="subtitle">Review captured PDFs, set Paperless metadata, then submit explicitly.</p>
+        </div>
+        <div class="pending-header-actions">
+          <a class="header-link" href="/">Scan</a>
+          <span class="header-username">{{ resolved_username or 'Unknown user' }}</span>
+        </div>
+      </header>
+
+      <section class="pending-layout">
+        <aside class="panel pending-queue-panel" aria-label="Pending scan queue">
+          <div class="pending-queue-heading">
+            <h2 class="panel-title">Queue</h2>
+            <button id="refreshPendingButton" type="button" class="secondary-button">Refresh</button>
+          </div>
+          <p id="pendingQueueSummary" class="muted-label">Loading…</p>
+          <div id="pendingQueue" class="pending-queue"></div>
+        </aside>
+
+        <section class="panel pending-review-panel">
+          <div id="pendingEmptyState" class="pending-empty">
+            No Pending document selected.
+          </div>
+
+          <div id="pendingReview" hidden>
+            <div class="pending-review-toolbar">
+              <div>
+                <strong id="pendingPosition">0 / 0</strong>
+                <span id="pendingStateBadge" class="pending-state-badge">ready</span>
+              </div>
+              <div class="pending-navigation">
+                <button id="previousPendingButton" type="button" class="secondary-button">Previous</button>
+                <button id="nextPendingButton" type="button" class="secondary-button">Next</button>
+              </div>
+            </div>
+
+            <iframe id="pendingPreview" class="pending-preview" title="Pending PDF preview"></iframe>
+
+            <div class="pending-file-actions">
+              <span id="pendingFileSummary"></span>
+              <a id="pendingDownloadLink" class="secondary-link" href="#">Download original PDF</a>
+            </div>
+
+            <form id="pendingMetadataForm" class="pending-form">
+              <label>
+                <span>Title</span>
+                <input id="pendingTitle" type="text" autocomplete="off" />
+              </label>
+
+              <label>
+                <span>Document date</span>
+                <input id="pendingDocumentDate" type="date" />
+              </label>
+
+              <div class="metadata-row">
+                <label>
+                  <span>Document Type</span>
+                  <select id="pendingDocumentType"></select>
+                </label>
+                <button type="button" class="create-metadata-button" data-kind="document_types">+ Create</button>
+              </div>
+
+              <div class="metadata-row">
+                <label>
+                  <span>Correspondent</span>
+                  <select id="pendingCorrespondent"></select>
+                </label>
+                <button type="button" class="create-metadata-button" data-kind="correspondents">+ Create</button>
+              </div>
+
+              <label>
+                <span>Storage Path</span>
+                <select id="pendingStoragePath"></select>
+              </label>
+
+              <div class="metadata-row metadata-row-tags">
+                <label>
+                  <span>Tags</span>
+                  <select id="pendingTags" multiple size="8"></select>
+                </label>
+                <button type="button" class="create-metadata-button" data-kind="tags">+ Create</button>
+              </div>
+
+              <div class="pending-form-actions">
+                <button id="saveMetadataButton" type="submit" class="secondary-button">Save metadata</button>
+                <button id="submitPendingButton" type="button" class="primary-button">Submit to Paperless</button>
+              </div>
+            </form>
+
+            <p id="pendingStatus" class="pending-status" role="status"></p>
+          </div>
+        </section>
+      </section>
+    </main>
+    <script src="/static/pending.js"></script>
+  </body>
+</html>
