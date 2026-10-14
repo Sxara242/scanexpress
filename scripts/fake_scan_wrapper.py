@@ -30,6 +30,22 @@ def _read_batch_pattern() -> str | None:
     return None
 
 
+def _read_output_file() -> str | None:
+    args = sys.argv[1:]
+    for index, arg in enumerate(args):
+        if arg.startswith("--output-file="):
+            return arg.split("=", 1)[1]
+        if arg == "--output-file" and index + 1 < len(args):
+            return args[index + 1]
+    return None
+
+
+def _write_single_output(output_file: str, payload: bytes) -> None:
+    path = Path(output_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+
+
 def _build_tiff_bytes(color: str) -> bytes:
     image = Image.new("RGB", (16, 16), color)
     output_buffer = io.BytesIO()
@@ -52,6 +68,7 @@ def _emit_progress(message: str) -> None:
 def main() -> int:
     mode = _read_mode()
     batch_pattern = _read_batch_pattern()
+    output_file = _read_output_file()
 
     if mode == "fail":
         sys.stderr.write("fake scanner forced failure\n")
@@ -84,8 +101,12 @@ def main() -> int:
         second_page = Image.new("RGB", (16, 16), "lightgray")
         third_page = Image.new("RGB", (16, 16), "silver")
         first_page.save(output_buffer, format="TIFF", save_all=True, append_images=[second_page, third_page])
-        sys.stdout.buffer.write(output_buffer.getvalue())
-        sys.stdout.buffer.flush()
+        payload = output_buffer.getvalue()
+        if output_file:
+            _write_single_output(output_file, payload)
+        else:
+            sys.stdout.buffer.write(payload)
+            sys.stdout.buffer.flush()
         return 0
 
     single_page = _build_tiff_bytes("white")
@@ -99,6 +120,9 @@ def main() -> int:
         if batch_pattern:
             _write_batch_outputs(batch_pattern, [single_page])
             return 0
+        if output_file:
+            _write_single_output(output_file, single_page)
+            return 0
 
         sys.stdout.buffer.write(single_page)
         sys.stdout.buffer.flush()
@@ -109,6 +133,9 @@ def main() -> int:
     _emit_progress("Batch terminated, 1 pages scanned")
     if batch_pattern:
         _write_batch_outputs(batch_pattern, [single_page])
+        return 0
+    if output_file:
+        _write_single_output(output_file, single_page)
         return 0
 
     sys.stdout.buffer.write(single_page)
