@@ -1349,5 +1349,86 @@ class FakeProcess:
         self.is_complete = True
 
 
+class HardwareEventDispatchTests(unittest.TestCase):
+    def test_hardware_document_event_uses_phase2_document_capture(self):
+        fake_config_manager = Mock()
+        fake_config_manager.get_default_user.return_value = "alice"
+
+        with patch.dict("os.environ", {}, clear=True), patch(
+            "app.get_config_manager", return_value=fake_config_manager
+        ), patch(
+            "app._capture_session_item",
+            return_value={"status": "ok", "action": "document-page"},
+        ) as mock_capture:
+            result = scan_app._dispatch_hardware_event(
+                {"action": "document", "target": "5", "source": "scanbd"}
+            )
+
+        self.assertEqual(result["action"], "document-page")
+        mock_capture.assert_called_once_with(
+            "document",
+            requested_device_name=None,
+            username="alice",
+        )
+
+    def test_hardware_batch_event_can_use_explicit_hardware_user_and_device(self):
+        fake_config_manager = Mock()
+
+        with patch.dict(
+            "os.environ",
+            {
+                "SCANEXPRESS_HARDWARE_USERNAME": "scanner-owner",
+                "SCANEXPRESS_HARDWARE_DEVICE": "lide400",
+            },
+            clear=True,
+        ), patch(
+            "app.get_config_manager", return_value=fake_config_manager
+        ), patch(
+            "app._capture_session_item",
+            return_value={"status": "ok", "action": "batch-item"},
+        ) as mock_capture:
+            result = scan_app._dispatch_hardware_event(
+                {"action": "batch", "target": "2", "source": "scanbd"}
+            )
+
+        self.assertEqual(result["action"], "batch-item")
+        mock_capture.assert_called_once_with(
+            "batch",
+            requested_device_name="lide400",
+            username="scanner-owner",
+        )
+
+    def test_hardware_finish_event_is_state_machine_finish(self):
+        fake_config_manager = Mock()
+        fake_config_manager.get_default_user.return_value = "alice"
+
+        with patch.dict("os.environ", {}, clear=True), patch(
+            "app.get_config_manager", return_value=fake_config_manager
+        ), patch(
+            "app._finish_active_scan_session",
+            return_value={"status": "ok", "logical_state": "IDLE"},
+        ) as mock_finish:
+            result = scan_app._dispatch_hardware_event(
+                {"action": "finish", "target": "6", "source": "scanbd"}
+            )
+
+        self.assertEqual(result["logical_state"], "IDLE")
+        mock_finish.assert_called_once_with(username="alice")
+
+    def test_hardware_event_fails_closed_without_user_identity(self):
+        fake_config_manager = Mock()
+        fake_config_manager.get_default_user.return_value = None
+
+        with patch.dict("os.environ", {}, clear=True), patch(
+            "app.get_config_manager", return_value=fake_config_manager
+        ):
+            with self.assertRaises(RuntimeError) as context:
+                scan_app._dispatch_hardware_event(
+                    {"action": "document", "target": "5", "source": "scanbd"}
+                )
+
+        self.assertIn("SCANEXPRESS_HARDWARE_USERNAME", str(context.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
