@@ -18,6 +18,7 @@ const tagsSelect = document.getElementById("pendingTags");
 const previousButton = document.getElementById("previousPendingButton");
 const nextButton = document.getElementById("nextPendingButton");
 const submitButton = document.getElementById("submitPendingButton");
+const discardButton = document.getElementById("discardPendingButton");
 const applyRemainingButton = document.getElementById("applyRemainingButton");
 const applyAllButton = document.getElementById("applyAllButton");
 const statusElement = document.getElementById("pendingStatus");
@@ -167,6 +168,7 @@ function renderSelected() {
   const locked = item.state === "submitted" || item.state === "submitting";
   const isBatchGroup = Boolean(item.session_id) && group.length > 1;
   submitButton.disabled = locked;
+  discardButton.disabled = locked;
   applyRemainingButton.disabled = locked || !isBatchGroup || groupIndex >= group.length - 1;
   applyAllButton.disabled = locked || !isBatchGroup;
   form.querySelectorAll("input, select").forEach((control) => {
@@ -306,6 +308,46 @@ async function applyMetadataScope(scope) {
 }
 
 
+async function discardSelected() {
+  const item = selectedItem();
+  if (!item) return;
+  if (item.state === "submitted" || item.state === "submitting") return;
+
+  const confirmed = window.confirm(
+    "Discard this scan? This permanently removes the local PDF from ScanExpress and cannot be undone."
+  );
+  if (!confirmed) return;
+
+  const index = selectedIndex();
+  const fallbackId = pendingItems[index + 1]?.id || pendingItems[index - 1]?.id || null;
+  discardButton.disabled = true;
+  setStatus("Discarding scan…");
+
+  try {
+    const response = await fetch(`/api/pending/${item.id}`, {method: "DELETE"});
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload?.message || "Failed to discard scan.");
+    }
+
+    stopTaskPolling();
+    selectedId = fallbackId;
+    if (selectedId) {
+      window.history.replaceState(null, "", `#${selectedId}`);
+    } else {
+      window.history.replaceState(null, "", window.location.pathname);
+    }
+    await loadPending(selectedId);
+    if (selectedId) {
+      setStatus("Scan discarded.");
+    }
+  } catch (error) {
+    setStatus(error.message || "Failed to discard scan.", true);
+    discardButton.disabled = false;
+  }
+}
+
+
 async function submitSelected() {
   const item = selectedItem();
   if (!item) return;
@@ -422,6 +464,10 @@ form.addEventListener("submit", async (event) => {
 
 submitButton.addEventListener("click", () => {
   void submitSelected();
+});
+
+discardButton.addEventListener("click", () => {
+  void discardSelected();
 });
 
 refreshButton.addEventListener("click", async () => {
