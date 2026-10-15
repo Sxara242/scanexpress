@@ -112,6 +112,25 @@
           </div>
         </section>
       </section>
+
+      <section class="panel pending-history-panel" aria-label="Recent scan history">
+        <div class="pending-queue-heading">
+          <div>
+            <h2 class="panel-title">Recent scan history</h2>
+            <p class="muted-label">Read-only status history. Imported documents remain in Paperless.</p>
+          </div>
+          <button id="refreshHistoryButton" type="button" class="secondary-button">Refresh history</button>
+        </div>
+        <p id="historySummary" class="muted-label" role="status">Loading history…</p>
+        <div id="historyTableWrapper" class="history-table-wrapper" hidden>
+          <table class="history-table">
+            <thead>
+              <tr><th scope="col">Document</th><th scope="col">Status</th><th scope="col">Last change (UTC)</th><th scope="col">Paperless ID</th></tr>
+            </thead>
+            <tbody id="historyRows"></tbody>
+          </table>
+        </div>
+      </section>
     </main>
     <script src="/static/pending.js"></script>
   </body>
