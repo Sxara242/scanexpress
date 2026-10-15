@@ -549,8 +549,10 @@ document.querySelectorAll(".create-metadata-button").forEach((button) => {
 
 (async () => {
   try {
-    await Promise.all([loadMetadata(), loadPending()]);
-    render();
+    // Avoid rendering Pending details while metadata is still loading.
+    // A second late initial render would overwrite unsaved user edits.
+    await loadMetadata();
+    await loadPending();
   } catch (error) {
     setStatus(error.message || "Failed to load Pending review.", true);
   }
