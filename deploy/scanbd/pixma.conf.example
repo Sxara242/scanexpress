@@ -1,0 +1,41 @@
+# ScanExpress reference scanbd device actions for Canon pixma backend.
+#
+# Keep the target function so scanbd exports SCANBD_TARGET. The LiDE 400 was
+# hardware-tested with:
+#   PDF Start  -> target 5
+#   PDF Finish -> target 6
+#   Auto Scan  -> target 2
+#   Copy       -> target 1
+#   Send       -> target 3
+#
+# Both button options call the same small adapter. The Scanner Manager performs
+# the target -> action mapping, debounce and serialized scan execution.
+
+device pixma {
+    function original {
+        filter = ".*original.*"
+        desc   = "Type of original"
+        env    = "SCANBD_ORIGINAL"
+    }
+
+    function target {
+        filter = ".*target.*"
+        desc   = "Target of the operation"
+        env    = "SCANBD_TARGET"
+    }
+
+    filter = "^pixma.*"
+    desc = "Canon Pixma Scanner"
+
+    action scan-color {
+        filter = ".*button-1.*"
+        desc   = "Button-1"
+        script = "scanbd_event_adapter.py"
+    }
+
+    action scan-bw {
+        filter = ".*button-2.*"
+        desc   = "Button-2"
+        script = "scanbd_event_adapter.py"
+    }
+}
