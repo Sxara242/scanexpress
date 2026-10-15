@@ -418,6 +418,7 @@ async function createMetadata(kind) {
     tags: "tag",
     correspondents: "correspondent",
     document_types: "document type",
+    storage_paths: "storage path",
   };
   const label = labels[kind];
   if (!label) return;
@@ -425,10 +426,31 @@ async function createMetadata(kind) {
   const name = window.prompt(`New ${label} name:`);
   if (!name || !name.trim()) return;
 
+  const requestBody = {name: name.trim()};
+  if (kind === "storage_paths") {
+    const defaultTemplate = `${name.trim()}/{{ created_year }}/{{ title }}`;
+    const path = window.prompt(
+      "Paperless relative folder / filename template (not an Ubuntu path):",
+      defaultTemplate
+    );
+    if (path === null) return;
+    if (!path.trim()) throw new Error("Storage path template cannot be empty.");
+    requestBody.path = path.trim();
+  }
+
+  // Creating an option must never save, discard or reset unsaved metadata.
+  const draft = {
+    pendingId: selectedId,
+    documentType: typeSelect.value,
+    correspondent: correspondentSelect.value,
+    storagePath: storageSelect.value,
+    tags: Array.from(tagsSelect.selectedOptions).map((option) => option.value),
+  };
+
   const response = await fetch(`/api/paperless/metadata/${kind}`, {
     method: "POST",
     headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({name: name.trim()}),
+    body: JSON.stringify(requestBody),
   });
   const payload = await response.json();
   if (!response.ok) {
@@ -436,19 +458,25 @@ async function createMetadata(kind) {
   }
 
   await loadMetadata();
-  renderSelected();
+  // A user may switch Pending items while an API request is in flight.
+  // Never apply the previous item's draft to a different selected item.
+  if (selectedId !== draft.pendingId) return;
 
-  const target = kind === "tags"
-    ? tagsSelect
-    : kind === "correspondents"
-      ? correspondentSelect
-      : typeSelect;
+  fillSingleSelect(typeSelect, metadataOptions.document_types, draft.documentType);
+  fillSingleSelect(correspondentSelect, metadataOptions.correspondents, draft.correspondent);
+  fillSingleSelect(storageSelect, metadataOptions.storage_paths, draft.storagePath);
+  fillTags(metadataOptions.tags, draft.tags);
+
+  const target = {
+    tags: tagsSelect,
+    correspondents: correspondentSelect,
+    document_types: typeSelect,
+    storage_paths: storageSelect,
+  }[kind];
   const option = Array.from(target.options).find(
     (entry) => String(entry.value) === String(payload.item.id)
   );
-  if (option) {
-    option.selected = true;
-  }
+  if (option) option.selected = true;
 }
 
 form.addEventListener("submit", async (event) => {
@@ -521,8 +549,10 @@ document.querySelectorAll(".create-metadata-button").forEach((button) => {
 
 (async () => {
   try {
-    await Promise.all([loadMetadata(), loadPending()]);
-    render();
+    // Avoid rendering Pending details while metadata is still loading.
+    // A second late initial render would overwrite unsaved user edits.
+    await loadMetadata();
+    await loadPending();
   } catch (error) {
     setStatus(error.message || "Failed to load Pending review.", true);
   }
