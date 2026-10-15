@@ -13,6 +13,7 @@ from storage import (
     cleanup_document_session_pages,
     complete_scan_session,
     create_pending_document,
+    discard_pending_document,
     ensure_scan_session,
     get_active_scan_session,
     get_scan_session,
@@ -146,6 +147,99 @@ class PendingDocumentStorageTests(unittest.TestCase):
         self.assertEqual(list_pending_documents("bob", paths=self.paths), [])
         with self.assertRaises(LookupError):
             get_pending_document(pending["id"], "bob", paths=self.paths)
+
+    def test_discard_pending_document_removes_record_pdf_and_preview(self):
+        pending = create_pending_document(
+            self._source_pdf(),
+            username="alice",
+            original_filename="bad-scan.pdf",
+            page_count=1,
+            paths=self.paths,
+        )
+        pdf_path, _ = resolve_pending_pdf_path(
+            pending["id"], "alice", paths=self.paths
+        )
+        preview_path = self.paths.previews / f"{pending['id']}.png"
+        preview_path.write_bytes(b"preview")
+        with sqlite3.connect(self.paths.database) as connection:
+            connection.execute(
+                "UPDATE pending_documents SET preview_path = ? WHERE id = ?",
+                (str(preview_path), pending["id"]),
+            )
+            connection.commit()
+
+        discarded = discard_pending_document(
+            pending["id"], "alice", paths=self.paths
+        )
+
+        self.assertEqual(discarded["id"], pending["id"])
+        self.assertFalse(pdf_path.exists())
+        self.assertFalse(preview_path.exists())
+        self.assertEqual(list_pending_documents("alice", paths=self.paths), [])
+        with self.assertRaises(LookupError):
+            get_pending_document(pending["id"], "alice", paths=self.paths)
+
+    def test_discard_pending_document_is_user_scoped(self):
+        pending = create_pending_document(
+            self._source_pdf(),
+            username="alice",
+            original_filename="private.pdf",
+            page_count=1,
+            paths=self.paths,
+        )
+        pdf_path, _ = resolve_pending_pdf_path(
+            pending["id"], "alice", paths=self.paths
+        )
+
+        with self.assertRaises(LookupError):
+            discard_pending_document(
+                pending["id"], "bob", paths=self.paths
+            )
+
+        self.assertTrue(pdf_path.exists())
+        self.assertEqual(
+            get_pending_document(pending["id"], "alice", paths=self.paths)["id"],
+            pending["id"],
+        )
+
+    def test_discard_rejects_submitting_and_submitted_documents(self):
+        submitting = create_pending_document(
+            self._source_pdf("submitting.pdf"),
+            username="alice",
+            original_filename="submitting.pdf",
+            page_count=1,
+            paths=self.paths,
+        )
+        set_pending_submission_state(
+            submitting["id"],
+            "alice",
+            state="submitting",
+            task_id="task-1",
+            paths=self.paths,
+        )
+        with self.assertRaises(RuntimeError):
+            discard_pending_document(
+                submitting["id"], "alice", paths=self.paths
+            )
+
+        submitted = create_pending_document(
+            self._source_pdf("submitted.pdf"),
+            username="alice",
+            original_filename="submitted.pdf",
+            page_count=1,
+            paths=self.paths,
+        )
+        set_pending_submission_state(
+            submitted["id"],
+            "alice",
+            state="submitted",
+            document_id="42",
+            paths=self.paths,
+        )
+        with self.assertRaises(RuntimeError):
+            discard_pending_document(
+                submitted["id"], "alice", paths=self.paths
+            )
 
     def test_update_pending_metadata_normalizes_ids_and_tags(self):
         pending = create_pending_document(
@@ -307,6 +401,48 @@ class ScanSessionStorageTests(unittest.TestCase):
         active = get_active_scan_session("alice", paths=self.paths)
         self.assertEqual(active["item_count"], 2)
         self.assertEqual(active["logical_state"], "BATCH_OPEN")
+
+    def test_discarding_open_batch_item_keeps_sequence_monotonic(self):
+        session = ensure_scan_session("alice", "batch", paths=self.paths)
+
+        first = create_pending_document(
+            self._source_pdf("first.pdf"),
+            username="alice",
+            original_filename="first.pdf",
+            page_count=1,
+            paths=self.paths,
+        )
+        second = create_pending_document(
+            self._source_pdf("second.pdf"),
+            username="alice",
+            original_filename="second.pdf",
+            page_count=1,
+            paths=self.paths,
+        )
+        first = attach_pending_to_batch_session(
+            first["id"], session["id"], "alice", paths=self.paths
+        )
+        second = attach_pending_to_batch_session(
+            second["id"], session["id"], "alice", paths=self.paths
+        )
+
+        discard_pending_document(first["id"], "alice", paths=self.paths)
+
+        third = create_pending_document(
+            self._source_pdf("third.pdf"),
+            username="alice",
+            original_filename="third.pdf",
+            page_count=1,
+            paths=self.paths,
+        )
+        third = attach_pending_to_batch_session(
+            third["id"], session["id"], "alice", paths=self.paths
+        )
+
+        self.assertEqual(second["sequence"], 2)
+        self.assertEqual(third["sequence"], 3)
+        active = get_active_scan_session("alice", paths=self.paths)
+        self.assertEqual(active["item_count"], 3)
 
     def test_apply_metadata_to_remaining_keeps_titles_independent(self):
         session = ensure_scan_session("alice", "batch", paths=self.paths)

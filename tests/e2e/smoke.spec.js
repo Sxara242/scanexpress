@@ -318,6 +318,40 @@ test("scan is saved as Pending, reviewed, and explicitly submitted", async ({ pa
   await expect(page.locator("#pendingStatus")).toContainText("Document ID: 4242");
 });
 
+test("Pending review can discard a bad scan from the queue", async ({ page, request }) => {
+  await page.goto("/");
+  await page.locator('input[name="deviceConfig"][value="flatbed"]').check();
+  await page.getByLabel("Filename").fill("bad-scan");
+  await page.getByRole("button", { name: "Start Scan" }).click();
+  await expect(page.locator("#statusText")).toContainText("Scan saved to Pending");
+
+  await page.getByRole("link", { name: "Review Pending" }).click();
+  await expect(page.locator(".pending-queue-item")).toHaveCount(1);
+
+  const previewSrc = await page.locator("#pendingPreview").getAttribute("src");
+  const pendingId = previewSrc.match(/\/api\/pending\/([^/]+)\/file/)?.[1];
+  expect(pendingId).toBeTruthy();
+
+  page.once("dialog", async (dialog) => {
+    expect(dialog.type()).toBe("confirm");
+    expect(dialog.message()).toContain("permanently removes the local PDF");
+    await dialog.accept();
+  });
+  await page.getByRole("button", { name: "Discard scan" }).click();
+
+  await expect(page.locator(".pending-queue-item")).toHaveCount(0);
+  await expect(page.locator("#pendingEmptyState")).toBeVisible();
+  await expect(page.locator("#pendingQueueSummary")).toHaveText("0 Pending documents");
+
+  const pending = await request.get("/api/pending");
+  expect(pending.ok()).toBeTruthy();
+  const pendingPayload = await pending.json();
+  expect(pendingPayload.pending).toHaveLength(0);
+
+  const removedFile = await request.get(`/api/pending/${pendingId}/file`);
+  expect(removedFile.status()).toBe(404);
+});
+
 test("Document session keeps pages until Finish and creates one Pending PDF", async ({ request }) => {
   const first = await request.post("/api/scan-session/document-page", {
     data: { device_name: "flatbed" },

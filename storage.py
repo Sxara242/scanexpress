@@ -324,6 +324,63 @@ def create_pending_document(
     return get_pending_document(pending_id, username, paths=resolved_paths)
 
 
+def discard_pending_document(
+    pending_id: str,
+    username: str,
+    *,
+    paths: StoragePaths | None = None,
+) -> dict:
+    connection, resolved_paths = _connect(paths)
+    try:
+        row = connection.execute(
+            """
+            SELECT id, session_id, sequence, state, pdf_path, preview_path
+            FROM pending_documents
+            WHERE id = ? AND username = ?
+            """,
+            (pending_id, username),
+        ).fetchone()
+        if row is None:
+            raise LookupError("Pending document not found.")
+
+        if row["state"] not in {"ready", "failed"}:
+            raise RuntimeError(
+                "Only ready or failed Pending scans can be discarded. "
+                "Submitted or in-progress Paperless documents must be managed in Paperless."
+            )
+
+        file_paths = []
+        for column_name in ("preview_path", "pdf_path"):
+            raw_path = row[column_name]
+            if raw_path:
+                file_paths.append(Path(raw_path))
+
+        for file_path in file_paths:
+            try:
+                file_path.unlink()
+            except FileNotFoundError:
+                pass
+
+        cursor = connection.execute(
+            "DELETE FROM pending_documents WHERE id = ? AND username = ?",
+            (pending_id, username),
+        )
+        if cursor.rowcount == 0:
+            raise LookupError("Pending document not found.")
+        connection.commit()
+
+        return {
+            "id": row["id"],
+            "session_id": row["session_id"],
+            "sequence": row["sequence"],
+        }
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
 def list_pending_documents(
     username: str,
     *,

@@ -24,6 +24,7 @@ from storage import (
     cleanup_document_session_pages,
     complete_scan_session,
     create_pending_document,
+    discard_pending_document,
     ensure_scan_session,
     get_active_scan_session,
     get_pending_document,
@@ -1766,6 +1767,26 @@ def api_get_pending_file(pending_id: str):
         download_name=original_filename,
         conditional=True,
     )
+
+
+@app.delete("/api/pending/<pending_id>")
+@_auth_required
+def api_discard_pending(pending_id: str):
+    try:
+        discarded = discard_pending_document(
+            pending_id,
+            _resolve_request_username(),
+        )
+        return jsonify({"status": "ok", "discarded": discarded}), 200
+    except LookupError:
+        return jsonify({"status": "error", "message": "Pending document not found."}), 404
+    except RuntimeError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 409
+    except OSError:
+        app.logger.exception("Failed to remove Pending scan files")
+        return jsonify(
+            {"status": "error", "message": "Failed to remove Pending scan files."}
+        ), 500
 
 
 @app.patch("/api/pending/<pending_id>/metadata")
