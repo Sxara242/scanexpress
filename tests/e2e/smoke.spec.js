@@ -14,6 +14,8 @@ if (!e2eDataDir) {
 
 let fakePaperlessServer;
 let paperlessUploadDelayMs = 0;
+let createdPaperlessMetadata = {};
+
 
 test.beforeAll(async () => {
   fakePaperlessServer = http.createServer((req, res) => {
@@ -36,20 +38,32 @@ test.beforeAll(async () => {
 
     if (req.method === "GET" && metadataLists[url.pathname]) {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ results: metadataLists[url.pathname], next: null }));
+      res.end(JSON.stringify({
+        results: [...metadataLists[url.pathname], ...(createdPaperlessMetadata[url.pathname] || [])],
+        next: null,
+      }));
       return;
     }
 
     if (
       req.method === "POST"
-      && ["/api/tags/", "/api/correspondents/", "/api/document_types/"].includes(url.pathname)
+      && ["/api/tags/", "/api/correspondents/", "/api/document_types/", "/api/storage_paths/"].includes(url.pathname)
     ) {
       let body = "";
       req.on("data", (chunk) => { body += chunk; });
       req.on("end", () => {
         const payload = body ? JSON.parse(body) : {};
+        if (url.pathname === "/api/storage_paths/" && !payload.path) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ path: ["This field is required."] }));
+          return;
+        }
+        const created = createdPaperlessMetadata[url.pathname] || [];
+        const item = { id: 99 + created.length, name: payload.name || "Created" };
+        if (url.pathname === "/api/storage_paths/") item.path = payload.path;
+        createdPaperlessMetadata[url.pathname] = [...created, item];
         res.writeHead(201, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ id: 99, name: payload.name || "Created" }));
+        res.end(JSON.stringify(item));
       });
       return;
     }
@@ -91,6 +105,7 @@ test.afterAll(async () => {
 
 test.beforeEach(async () => {
   paperlessUploadDelayMs = 0;
+  createdPaperlessMetadata = {};
   await fs.rm(e2eDataDir, { recursive: true, force: true });
   await fs.writeFile(modeFilePath, "success", "utf-8");
 });
@@ -316,6 +331,61 @@ test("scan is saved as Pending, reviewed, and explicitly submitted", async ({ pa
   await page.getByRole("button", { name: "Submit to Paperless" }).click();
   await expect(page.locator("#pendingStateBadge")).toHaveText("submitted");
   await expect(page.locator("#pendingStatus")).toContainText("Document ID: 4242");
+});
+
+test("Creating Paperless metadata keeps unsaved Pending fields and creates folder-like storage path", async ({ page, request }) => {
+  await page.goto("/");
+  await page.locator('input[name="deviceConfig"][value="flatbed"]').check();
+  await page.getByRole("button", { name: "Start Scan" }).click();
+  await expect(page.locator("#statusText")).toContainText("Scan saved to Pending");
+  await page.getByRole("link", { name: "Review Pending" }).click();
+
+  await page.locator("#pendingTitle").fill("Unsaved diploma draft");
+  await page.locator("#pendingDocumentDate").fill("2026-10-15");
+  await page.locator("#pendingDocumentType").selectOption("11");
+  await page.locator("#pendingCorrespondent").selectOption("21");
+  await page.locator("#pendingStoragePath").selectOption("31");
+  await page.locator("#pendingTags").selectOption(["1", "2"]);
+
+  const assertDraft = async () => {
+    await expect(page.locator("#pendingTitle")).toHaveValue("Unsaved diploma draft");
+    await expect(page.locator("#pendingDocumentDate")).toHaveValue("2026-10-15");
+    await expect(page.locator("#pendingDocumentType")).toHaveValue("11");
+    await expect(page.locator("#pendingTags option:checked")).toHaveCount(3);
+  };
+
+  page.once("dialog", (dialog) => dialog.accept("New tag"));
+  await page.locator('[data-kind="tags"]').click();
+  await expect(page.locator("#pendingTags option:checked")).toHaveCount(3);
+  await assertDraft();
+
+  page.once("dialog", (dialog) => dialog.accept("New correspondent"));
+  await page.locator('[data-kind="correspondents"]').click();
+  await expect(page.locator("#pendingCorrespondent")).toHaveValue("99");
+  await assertDraft();
+
+  const storagePrompts = ["Agricultural/Receipts", "Agricultural/Receipts/{{ created_year }}/{{ title }}"];
+  const acceptStoragePrompt = (dialog) => dialog.accept(storagePrompts.shift());
+  page.on("dialog", acceptStoragePrompt);
+  await page.locator('[data-kind="storage_paths"]').click();
+  page.off("dialog", acceptStoragePrompt);
+
+  await expect(page.locator("#pendingStoragePath")).toHaveValue("99");
+  await expect(page.locator("#pendingCorrespondent")).toHaveValue("99");
+  await assertDraft();
+
+  const metadata = await request.get("/api/paperless/metadata");
+  const options = await metadata.json();
+  expect(metadata.ok()).toBeTruthy();
+  expect(options.storage_paths).toEqual(expect.arrayContaining([
+    expect.objectContaining({ id: 99, name: "Agricultural/Receipts" }),
+  ]));
+  expect(createdPaperlessMetadata["/api/storage_paths/"][0].path)
+    .toBe("Agricultural/Receipts/{{ created_year }}/{{ title }}");
+
+  // The draft should not be persisted until the owner chooses Save.
+  const list = await (await request.get("/api/pending")).json();
+  expect(list.pending[0].metadata.title).not.toBe("Unsaved diploma draft");
 });
 
 test("Pending review can discard a bad scan from the queue", async ({ page, request }) => {
