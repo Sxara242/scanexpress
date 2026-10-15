@@ -58,6 +58,37 @@ Next engineering phase:
 
 Do not bypass the existing session APIs. Hardware events should map into the Phase 2 state machine rather than duplicating capture/business logic.
 
+## Phase 3 software status — 2026-10-15
+
+Merged to `main`:
+
+- local Unix-domain hardware event socket,
+- configurable target -> action mapping,
+- serialized background hardware worker,
+- duplicate-inflight suppression,
+- monotonic debounce,
+- scanbd action adapter,
+- LiDE 400 deployment mapping,
+- scanbd/scanbm/SANE-net deployment documentation,
+- unit tests for event mapping, debounce, socket transport and app dispatch.
+
+Reference mapping remains:
+
+- target 5 -> Document page,
+- target 6 -> Finish,
+- target 2 -> Batch item,
+- targets 1 and 3 -> reserved/ignored.
+
+Important: Phase 3 is **software-complete but not hardware-accepted**. The Dell + Canon LiDE 400 still requires real scanbd/scanbm validation. Do not mark the physical-button workflow DONE until the real-device acceptance gates pass.
+
+Next stopping point:
+
+1. Inspect the Ubuntu scanbd package layout and service/socket units on the Dell.
+2. Confirm where the package expects action scripts and how scanbm is socket-activated.
+3. Prove actual action-script invocation count per physical press with a logger.
+4. Configure SANE net-backend -> scanbm and direct pixma backend separation.
+5. Install the ScanExpress adapter and then run the real Document / Batch / Finish acceptance tests.
+
 ## Reference hardware
 
 Canon CanoScan LiDE 400 on Linux/SANE.
