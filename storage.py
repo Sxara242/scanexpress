@@ -5,6 +5,7 @@ import shutil
 import sqlite3
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -1040,14 +1041,95 @@ def apply_pending_metadata_scope(
         connection.close()
 
 
+def preview_submitted_retention(
+    days: int = 30,
+    *,
+    now: datetime | None = None,
+    data_dir: Path | None = None,
+) -> dict:
+    """Read-only preview. Never remove PDFs or modify the ScanExpress database.
+
+    Only confirmed submitted items with a Paperless document ID and an old
+    enough last-state-change timestamp are considered. This is a conservative
+    starting point, not an executable deletion policy.
+    """
+    if isinstance(days, bool) or not isinstance(days, int) or days < 1:
+        raise ValueError("Retention days must be a positive integer.")
+    current = now if now is not None else datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        raise ValueError("The current timestamp must include a timezone.")
+    cutoff = (current.astimezone(timezone.utc) - timedelta(days=days)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+    root = (data_dir or resolve_data_dir()).expanduser().resolve()
+    database = root / "scanexpress.sqlite3"
+    pending_root = root / "pending"
+    # Explicit read-only URI: no bootstrap, migrations, chmod, or writes.
+    connection = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        rows = connection.execute(
+            """
+            SELECT id, pdf_path, updated_at
+            FROM pending_documents
+            WHERE state = 'submitted'
+              AND paperless_document_id IS NOT NULL
+              AND paperless_document_id != ''
+              AND pdf_path IS NOT NULL
+              AND datetime(updated_at) <= datetime(?)
+            ORDER BY updated_at, id
+            """,
+            (cutoff,),
+        ).fetchall()
+    finally:
+        connection.close()
+
+    candidates = []
+    skipped = 0
+    for row in rows:
+        pdf = Path(row["pdf_path"])
+        # Fail closed on missing PDFs, path escapes and symlinks.
+        if (
+            pdf.is_symlink()
+            or not pdf.is_file()
+            or not pdf.resolve().is_relative_to(pending_root)
+        ):
+            skipped += 1
+            continue
+        candidates.append({
+            "id": row["id"],
+            "submitted_timestamp_utc": row["updated_at"],
+            "local_pdf_bytes": pdf.stat().st_size,
+        })
+
+    return {
+        "mode": "preview-only",
+        "retention_days": days,
+        "cutoff_utc": cutoff,
+        "eligible_count": len(candidates),
+        "eligible_pdf_bytes": sum(item["local_pdf_bytes"] for item in candidates),
+        "skipped_unsafe_or_missing": skipped,
+        "items": candidates,
+    }
+
+
 def _main() -> int:
-    parser = argparse.ArgumentParser(description="Initialize ScanExpress persistent storage.")
-    parser.add_argument("command", nargs="?", default="init", choices=["init"])
+    parser = argparse.ArgumentParser(description="ScanExpress storage maintenance.")
+    parser.add_argument(
+        "command", nargs="?", default="init", choices=["init", "retention-preview"]
+    )
+    parser.add_argument("--days", type=int, default=30)
     args = parser.parse_args()
 
     if args.command == "init":
         paths = initialize_storage()
         print(f"Initialized ScanExpress storage at {paths.root}")
+        return 0
+    if args.command == "retention-preview":
+        if args.days < 1:
+            parser.error("--days must be at least 1")
+        print(json.dumps(preview_submitted_retention(days=args.days), indent=2))
         return 0
 
     return 1
