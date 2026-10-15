@@ -72,6 +72,51 @@ class ScanInProgressError(RuntimeError):
     pass
 
 
+def _resolve_hardware_username() -> str:
+    configured = os.getenv("SCANEXPRESS_HARDWARE_USERNAME", "").strip()
+    if configured:
+        return configured
+
+    default_user = get_config_manager().get_default_user()
+    if isinstance(default_user, str) and default_user.strip():
+        return default_user.strip()
+
+    raise RuntimeError(
+        "Hardware scanning requires SCANEXPRESS_HARDWARE_USERNAME "
+        "or a configured global.default_user."
+    )
+
+
+def _resolve_hardware_device_name() -> str | None:
+    configured = os.getenv("SCANEXPRESS_HARDWARE_DEVICE", "").strip()
+    return configured or None
+
+
+def _dispatch_hardware_event(event: dict) -> dict:
+    action = str(event.get("action") or "").strip().lower()
+    username = _resolve_hardware_username()
+    device_name = _resolve_hardware_device_name()
+
+    if action == "document":
+        return _capture_session_item(
+            "document",
+            requested_device_name=device_name,
+            username=username,
+        )
+
+    if action == "batch":
+        return _capture_session_item(
+            "batch",
+            requested_device_name=device_name,
+            username=username,
+        )
+
+    if action == "finish":
+        return _finish_active_scan_session(username=username)
+
+    raise RuntimeError(f"Unsupported normalized hardware action '{action}'.")
+
+
 def _current_time_millis() -> int:
     return int(time.time() * 1000)
 
