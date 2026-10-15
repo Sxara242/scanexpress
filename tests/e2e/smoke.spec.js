@@ -323,6 +323,7 @@ test("Pending review can discard a bad scan from the queue", async ({ page, requ
   await page.locator('input[name="deviceConfig"][value="flatbed"]').check();
   await page.getByLabel("Filename").fill("bad-scan");
   await page.getByRole("button", { name: "Start Scan" }).click();
+  await expect(page.locator("#statusText")).toContainText("Scan saved to Pending");
 
   await page.getByRole("link", { name: "Review Pending" }).click();
   await expect(page.locator(".pending-queue-item")).toHaveCount(1);
