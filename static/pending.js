@@ -22,6 +22,10 @@ const discardButton = document.getElementById("discardPendingButton");
 const applyRemainingButton = document.getElementById("applyRemainingButton");
 const applyAllButton = document.getElementById("applyAllButton");
 const statusElement = document.getElementById("pendingStatus");
+const historySummary = document.getElementById("historySummary");
+const historyRows = document.getElementById("historyRows");
+const historyWrapper = document.getElementById("historyTableWrapper");
+const refreshHistoryButton = document.getElementById("refreshHistoryButton");
 
 let pendingItems = [];
 let selectedId = window.location.hash.replace(/^#/, "") || null;
@@ -92,6 +96,55 @@ function fillTags(items, selectedIds) {
     option.textContent = optionLabel(item);
     option.selected = selected.has(String(item.id));
     tagsSelect.appendChild(option);
+  }
+}
+
+const historyStates = {
+  ready: "Ready for review",
+  submitting: "Processing in Paperless",
+  submitted: "Imported",
+  failed: "Needs attention",
+};
+
+async function loadHistory() {
+  try {
+    const response = await fetch("/api/pending?include_submitted=1");
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload?.message || "Could not load scan history.");
+    }
+    const all = Array.isArray(payload.pending) ? payload.pending : [];
+    const latest = [...all].sort(
+      (left, right) => String(right.updated_at || "").localeCompare(String(left.updated_at || ""))
+    ).slice(0, 30);
+    historyRows.replaceChildren();
+
+    for (const item of latest) {
+      const tr = document.createElement("tr");
+      const documentCell = document.createElement("td");
+      documentCell.textContent = item.metadata?.title || item.original_filename || item.id;
+      const stateCell = document.createElement("td");
+      const stateLabel = document.createElement("span");
+      stateLabel.className = "history-state";
+      stateLabel.dataset.state = item.state;
+      stateLabel.textContent = historyStates[item.state] || item.state || "Unknown";
+      stateCell.appendChild(stateLabel);
+      const dateCell = document.createElement("td");
+      dateCell.textContent = item.updated_at
+        ? `${String(item.updated_at)} UTC` : "—";
+      const paperlessCell = document.createElement("td");
+      paperlessCell.textContent = item.paperless_document_id || "—";
+      tr.append(documentCell, stateCell, dateCell, paperlessCell);
+      historyRows.appendChild(tr);
+    }
+
+    historyWrapper.hidden = latest.length === 0;
+    historySummary.textContent = all.length
+      ? `${all.length} recorded scan(s) · showing latest ${latest.length}`
+      : "No scans recorded yet.";
+  } catch (error) {
+    historySummary.textContent = error.message || "History unavailable.";
+    throw error;
   }
 }
 
@@ -367,6 +420,7 @@ async function submitSelected() {
       pendingItems[index] = payload.pending;
       render();
     }
+    void loadHistory().catch(() => {});
     if (payload.paperless_task_id) {
       scheduleTaskPolling(payload.paperless_task_id);
     } else if (payload.pending?.state === "submitted") {
@@ -401,6 +455,9 @@ function scheduleTaskPolling(taskId) {
         throw new Error(payload?.message || "Task status lookup failed.");
       }
       await refreshSelectedDetail(selectedId);
+      if (payload.task_status === "SUCCESS" || payload.task_status === "FAILURE") {
+        void loadHistory().catch(() => {});
+      }
       if (payload.task_status !== "SUCCESS" && payload.task_status !== "FAILURE") {
         scheduleTaskPolling(taskId);
       } else {
@@ -498,6 +555,10 @@ discardButton.addEventListener("click", () => {
   void discardSelected();
 });
 
+refreshHistoryButton.addEventListener("click", () => {
+  void loadHistory().catch(() => {});
+});
+
 refreshButton.addEventListener("click", async () => {
   try {
     await loadPending(selectedId);
@@ -553,6 +614,7 @@ document.querySelectorAll(".create-metadata-button").forEach((button) => {
     // A second late initial render would overwrite unsaved user edits.
     await loadMetadata();
     await loadPending();
+    await loadHistory().catch(() => {});
   } catch (error) {
     setStatus(error.message || "Failed to load Pending review.", true);
   }
