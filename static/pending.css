@@ -200,6 +200,67 @@
   text-align: center;
 }
 
+
+.pending-history-panel {
+  margin-top: 16px;
+}
+
+.pending-history-panel .pending-queue-heading {
+  flex-wrap: wrap;
+}
+
+.history-table-wrapper {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.history-table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+}
+
+.history-table th,
+.history-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--paperless-border);
+  overflow-wrap: anywhere;
+}
+
+.history-table th {
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+.history-state {
+  display: inline-block;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  background: #e5e7eb;
+}
+
+.history-state[data-state="submitted"] {
+  background: #dbeafe;
+  color: #1e3a8a;
+}
+
+.history-state[data-state="ready"] {
+  background: #e7f5ea;
+  color: #17541f;
+}
+
+.history-state[data-state="failed"] {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.history-state[data-state="submitting"] {
+  background: #fef3c7;
+  color: #92400e;
+}
+
 @media (max-width: 860px) {
   .pending-layout {
     grid-template-columns: 1fr;
