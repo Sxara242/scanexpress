@@ -21,7 +21,13 @@ The production path is:
         -> saned/local pixma backend
         -> USB scanner
 
-The Unix socket is deliberately separate from the web server. Physical-button
+The Unix socket is deliberately separate from the web server. In the reference
+systemd service, ScanExpress runs with primary group `scanner` and
+supplementary group `scanexpress`. This lets the `saned:scanner` scanbd
+action connect to the mode-0660 socket while the application can still read its
+root:scanexpress configuration file.
+
+Physical-button
 events are therefore not exposed through Tailscale Serve or any HTTP reverse
 proxy.
 
@@ -126,6 +132,8 @@ host before editing because packaging can differ between releases.
 - Keep Gunicorn at one worker for the reference deployment. The Unix socket,
   in-process hardware queue and scanner lock live in that worker.
 - Threads are fine; the hardware worker itself is serialized.
+- The reference web bind is 127.0.0.1:8010 so it does not collide with a
+  Paperless instance already using loopback port 8000.
 - Do not expose the hardware event socket over TCP.
 - Do not make scanbd scripts perform scanning themselves.
 - Do not bypass the Phase 2 state machine.

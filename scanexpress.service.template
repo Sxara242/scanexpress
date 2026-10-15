@@ -5,7 +5,8 @@ After=network.target
 [Service]
 Type=simple
 User=scanexpress
-Group=scanexpress
+Group=scanner
+SupplementaryGroups=scanexpress
 WorkingDirectory=/opt/scanexpress
 Environment="SCANEXPRESS_CONFIG_FILE=/etc/scanexpress.conf"
 Environment="SCANEXPRESS_DATA_DIR=/var/lib/scanexpress"
@@ -22,7 +23,7 @@ Environment="SCANEXPRESS_HARDWARE_DEBOUNCE_SECONDS=1.5"
 RuntimeDirectory=scanexpress
 RuntimeDirectoryMode=0750
 ExecStartPre=/opt/scanexpress/.venv/bin/python -m storage init
-ExecStart=/opt/scanexpress/.venv/bin/gunicorn --workers 1 --threads 4 --bind 127.0.0.1:8000 --access-logfile - --error-logfile - wsgi:app
+ExecStart=/opt/scanexpress/.venv/bin/gunicorn --workers 1 --threads 4 --bind 127.0.0.1:8010 --access-logfile - --error-logfile - wsgi:app
 Restart=on-failure
 RestartSec=3
 UMask=0077
