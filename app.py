@@ -1209,20 +1209,36 @@ def _fetch_paperless_metadata_collection(kind: str, username: str) -> list[dict]
     return collected
 
 
-def _create_paperless_metadata_object(kind: str, name: str, username: str) -> dict:
-    if kind not in {"tags", "correspondents", "document_types"}:
+def _create_paperless_metadata_object(
+    kind: str, name: str, username: str, *, path: str | None = None
+) -> dict:
+    if kind not in {"tags", "correspondents", "document_types", "storage_paths"}:
         raise ValueError("Creating this Paperless metadata kind is not supported.")
 
     normalized_name = name.strip()
     if not normalized_name:
         raise ValueError("name is required.")
 
+    create_payload = {"name": normalized_name}
+    if kind == "storage_paths":
+        if not isinstance(path, str) or not path.strip():
+            raise ValueError("A storage path template is required.")
+        normalized_path = path.strip()
+        parts = normalized_path.split("/")
+        if (
+            "\\" in normalized_path
+            or any(part in {"", ".", ".."} for part in parts)
+            or "\x00" in normalized_path
+        ):
+            raise ValueError("Storage path must be a safe relative path template.")
+        create_payload["path"] = normalized_path
+
     endpoint = _PAPERLESS_METADATA_ENDPOINTS[kind]
     try:
         response = requests.post(
             _paperless_api_url(f"{endpoint}/"),
             headers=_paperless_headers(username),
-            json={"name": normalized_name},
+            json=create_payload,
             timeout=15,
         )
     except requests.RequestException as exc:
@@ -1860,6 +1876,7 @@ def api_create_paperless_metadata(kind: str):
             kind,
             name,
             _resolve_request_username(),
+            path=body.get("path"),
         )
         return jsonify({"status": "ok", "item": created}), 201
     except ValueError as exc:
