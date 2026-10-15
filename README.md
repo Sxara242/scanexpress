@@ -21,7 +21,7 @@ This fork is evolving ScanExpress into the physical-button and Pending-review
 workflow described in `docs/SCANNER_MANAGER_MASTER_SPEC.md`.
 
 The reference production deployment uses a systemd-managed Gunicorn process
-bound to loopback. The service template initializes persistent state under
+bound to loopback on port 8010. The service template initializes persistent state under
 `/var/lib/scanexpress` before startup. Set a real `secret_key` (or
 `SCANEXPRESS_SECRET_KEY`) before production startup; the WSGI entry point
 fails closed when it is missing.
@@ -50,7 +50,7 @@ One-time app install:
 
     sudo mkdir -p /opt/scanexpress
     sudo chown "$USER":"$USER" /opt/scanexpress
-    git clone https://github.com/baztian/scanexpress /opt/scanexpress
+    git clone https://github.com/Sxara242/scanexpress /opt/scanexpress
     cd /opt/scanexpress
     python3 -m venv --system-site-packages .venv
     source .venv/bin/activate
@@ -66,6 +66,11 @@ Create service account and group:
 
     sudo groupadd --system scanexpress
     sudo useradd --system --gid scanexpress --create-home --home /var/lib/scanexpress --shell /usr/sbin/nologin scanexpress
+
+For physical-button deployments, the reference service runs the process with
+primary group `scanner` so the scanbd user/group can reach the local Unix
+event socket, while retaining `scanexpress` as a supplementary group for
+reading the protected configuration file.
 
 Create config file from sample:
 
@@ -159,7 +164,7 @@ Install service from `scanexpress.service.template`:
 
 Quick validation:
 
-    curl -sS -X POST http://127.0.0.1:8000/api/scan
+    curl -sS -X POST http://127.0.0.1:8010/api/scan
     sudo journalctl -u scanexpress -n 80 --no-pager
 
 ## Backend Scan + Upload Configuration
