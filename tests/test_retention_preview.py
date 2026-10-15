@@ -67,10 +67,12 @@ class SubmittedRetentionPreviewTests(unittest.TestCase):
         self.assertEqual(
             self.preview(days=50)["eligible_count"], 0,
         )
-        self.assertTrue(
-            next(self.paths.pending.glob(f"{ready['id']}*"), None) is not None
-            or len(list(self.paths.pending.iterdir())) > 0
-        )
+        with sqlite3.connect(self.paths.database) as connection:
+            ready_path = connection.execute(
+                "SELECT pdf_path FROM pending_documents WHERE id = ?",
+                (ready["id"],),
+            ).fetchone()[0]
+        self.assertTrue(Path(ready_path).is_file())
 
     def test_preview_does_not_remove_files_or_change_database(self):
         self.create("submitted", 35)
