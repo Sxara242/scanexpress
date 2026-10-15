@@ -24,6 +24,7 @@
 .pending-queue-heading,
 .pending-review-toolbar,
 .pending-file-actions,
+.pending-file-action-buttons,
 .pending-form-actions,
 .pending-navigation {
   display: flex;
@@ -143,7 +144,8 @@
 
 .primary-button,
 .secondary-button,
-.create-metadata-button {
+.create-metadata-button,
+.discard-button {
   font: inherit;
   border-radius: 8px;
   padding: 9px 12px;
@@ -164,9 +166,16 @@
   color: var(--paperless-green);
 }
 
+.discard-button {
+  border: 1px solid #b91c1c;
+  background: #ffffff;
+  color: #b91c1c;
+}
+
 .primary-button:disabled,
 .secondary-button:disabled,
-.create-metadata-button:disabled {
+.create-metadata-button:disabled,
+.discard-button:disabled {
   opacity: 0.6;
   cursor: not-allowed;
 }
