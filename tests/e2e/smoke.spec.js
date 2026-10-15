@@ -316,6 +316,7 @@ test("scan is saved as Pending, reviewed, and explicitly submitted", async ({ pa
   await expect(page.locator(".pending-queue-item")).toHaveCount(1);
   await expect(page.locator("#pendingPosition")).toHaveText("1 / 1");
   await expect(page.locator("#pendingStateBadge")).toHaveText("ready");
+  await expect(page.locator("#historyRows .history-state")).toHaveText("Ready for review");
   await expect(page.locator("#pendingPreview")).toHaveAttribute("src", /\/api\/pending\/.+\/file/);
 
   await page.locator("#pendingTitle").fill("School Certificate - 2002");
@@ -331,6 +332,18 @@ test("scan is saved as Pending, reviewed, and explicitly submitted", async ({ pa
   await page.getByRole("button", { name: "Submit to Paperless" }).click();
   await expect(page.locator("#pendingStateBadge")).toHaveText("submitted");
   await expect(page.locator("#pendingStatus")).toContainText("Document ID: 4242");
+
+  await expect(page.locator("#historyRows tr")).toHaveCount(1);
+  await expect(page.locator("#historyRows tr")).toContainText("School Certificate - 2002");
+  await expect(page.locator("#historyRows .history-state")).toHaveText("Imported");
+  await expect(page.locator("#historyRows tr")).toContainText("4242");
+
+  // Imported scans leave the editable queue but remain in history.
+  await page.reload();
+  await expect(page.locator(".pending-queue-item")).toHaveCount(0);
+  await expect(page.locator("#historyRows .history-state")).toHaveText("Imported");
+  await page.locator("#refreshHistoryButton").click();
+  await expect(page.locator("#historyRows tr")).toContainText("School Certificate - 2002");
 });
 
 test("Creating Paperless metadata keeps unsaved Pending fields and creates folder-like storage path", async ({ page, request }) => {
