@@ -160,7 +160,7 @@ Required behavior:
 
 Current readiness assessment:
 
-- Already prepared: `_RECENT_UPLOADS_BY_USER` and helper functions already store entries keyed by username.
+- Already prepared: SQLite-backed recent-upload helpers and Pending queries isolate entries by username; the API returns the latest 30 unique uploads.
 - Required adjustment: all call sites must pass the authenticated username rather than deriving user from global config.
 
 ## Device Locking Requirements

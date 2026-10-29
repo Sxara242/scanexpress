@@ -30,10 +30,12 @@ from storage import (
     get_pending_document,
     list_document_page_paths,
     list_pending_documents,
+    list_recent_uploads,
     record_scan_session_error,
     resolve_pending_pdf_path,
     set_pending_submission_state,
     update_pending_metadata,
+    upsert_recent_upload,
 )
 
 try:
@@ -53,9 +55,6 @@ _PAPERLESS_UPLOAD_RETRY_BASE_DELAY_SECONDS = 0.5
 _PAPERLESS_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 _BASE62_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 _DEFAULT_FILENAME_TEMPLATE = "scan_{scan_uuid}"
-_MAX_RECENT_UPLOADS = 10
-_RECENT_UPLOADS_LOCK = threading.Lock()
-_RECENT_UPLOADS_BY_USER: dict[str, list[dict[str, object | None]]] = {}
 _DEFAULT_AUTH_REALM = "ScanExpress"
 _BASIC_AUTH_SUPPRESSED_SESSION_KEY = "basic_auth_suppressed"
 
@@ -122,57 +121,16 @@ def _current_time_millis() -> int:
     return int(time.time() * 1000)
 
 
-def _build_recent_upload_defaults(task_id: str) -> dict[str, object | None]:
-    now_millis = _current_time_millis()
-    return {
-        "task_id": task_id,
-        "submitted_at": now_millis,
-        "device_name": None,
-        "file_name": None,
-        "task_status": "STARTED",
-        "result_text": None,
-        "related_document": None,
-        "is_polling": True,
-        "last_error": None,
-        "last_updated_at": now_millis,
-        "poll_failure_count": 0,
-    }
-
-
 def _upsert_recent_upload_for_user(
     username: str,
     task_id: str,
     updates: dict[str, object | None] | None = None,
 ) -> dict[str, object | None]:
-    normalized_task_id = task_id.strip()
-    if normalized_task_id == "":
-        raise RuntimeError("task_id is required for recent upload history.")
-
-    next_updates = dict(updates or {})
-    next_updates["task_id"] = normalized_task_id
-    if "last_updated_at" not in next_updates:
-        next_updates["last_updated_at"] = _current_time_millis()
-
-    with _RECENT_UPLOADS_LOCK:
-        user_history = _RECENT_UPLOADS_BY_USER.setdefault(username, [])
-        for existing_index, existing_entry in enumerate(user_history):
-            if existing_entry.get("task_id") != normalized_task_id:
-                continue
-
-            merged_entry = {**existing_entry, **next_updates}
-            user_history[existing_index] = merged_entry
-            return dict(merged_entry)
-
-        new_entry = {**_build_recent_upload_defaults(normalized_task_id), **next_updates}
-        user_history.insert(0, new_entry)
-        del user_history[_MAX_RECENT_UPLOADS:]
-        return dict(new_entry)
+    return upsert_recent_upload(username, task_id, updates)
 
 
 def _list_recent_uploads_for_user(username: str) -> list[dict[str, object | None]]:
-    with _RECENT_UPLOADS_LOCK:
-        user_history = _RECENT_UPLOADS_BY_USER.get(username, [])
-        return [dict(entry) for entry in user_history]
+    return list_recent_uploads(username)
 
 
 def _is_paperless_upload_failure_message(message: str) -> bool:
@@ -1010,11 +968,31 @@ def _build_paperless_task_url(task_id: str) -> str:
     return f"{base_url}/api/tasks/?task_id={task_id}"
 
 
+def _positive_document_id(value: object) -> str | None:
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return None
+    text = str(value).strip()
+    if not re.fullmatch(r"[0-9]+", text):
+        return None
+    # Strip leading zeros without integer conversion (untrusted IDs can be long).
+    return text.lstrip("0") or None
+
+
 def _normalize_paperless_task_payload(task_id: str, task_payload: dict | None) -> dict:
     task_payload = task_payload if isinstance(task_payload, dict) else {}
-    related_document = task_payload.get("related_document")
-    if related_document is not None:
-        related_document = str(related_document)
+    result_data = task_payload.get("result_data")
+    related_ids = task_payload.get("related_document_ids")
+    candidates = [task_payload.get("related_document")]
+    if isinstance(result_data, dict):
+        candidates.append(result_data.get("document_id"))
+    if isinstance(related_ids, list):
+        candidates.extend(related_ids)
+    related_document = next(
+        (document_id for value in candidates if (document_id := _positive_document_id(value))),
+        None,
+    )
+    task_status = task_payload.get("status")
+    task_status = task_status.strip().upper() if isinstance(task_status, str) else None
 
     result = task_payload.get("result")
     if result is not None:
@@ -1031,7 +1009,7 @@ def _normalize_paperless_task_payload(task_id: str, task_payload: dict | None) -
     return {
         "status": "ok",
         "task_id": task_id,
-        "task_status": task_payload.get("status"),
+        "task_status": task_status,
         "related_document": related_document,
         "result": result,
         "date_done": date_done,

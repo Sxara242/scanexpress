@@ -3,13 +3,14 @@ import json
 import os
 import shutil
 import sqlite3
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 _DEFAULT_DATA_DIR = "~/.local/share/scanexpress"
 
 
@@ -149,6 +150,20 @@ def _apply_schema_v3(connection: sqlite3.Connection) -> None:
     )
 
 
+def _apply_schema_v4(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS recent_uploads (
+            username TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            submitted_at INTEGER NOT NULL,
+            payload_json TEXT NOT NULL,
+            PRIMARY KEY (username, task_id)
+        )
+        """
+    )
+
+
 def initialize_storage(data_dir: Path | None = None) -> StoragePaths:
     root = (data_dir or resolve_data_dir()).expanduser()
     pending = root / "pending"
@@ -182,6 +197,9 @@ def initialize_storage(data_dir: Path | None = None) -> StoragePaths:
         if 3 not in applied_versions:
             _apply_schema_v3(connection)
             connection.execute("INSERT INTO schema_migrations(version) VALUES (3)")
+        if 4 not in applied_versions:
+            _apply_schema_v4(connection)
+            connection.execute("INSERT INTO schema_migrations(version) VALUES (4)")
         connection.commit()
 
     try:
@@ -204,6 +222,136 @@ def _connect(paths: StoragePaths | None = None) -> tuple[sqlite3.Connection, Sto
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     return connection, resolved_paths
+
+
+def _recent_upload_defaults(task_id: str) -> dict:
+    now = int(time.time() * 1000)
+    return {
+        "task_id": task_id,
+        "submitted_at": now,
+        "device_name": None,
+        "file_name": None,
+        "task_status": "STARTED",
+        "result_text": None,
+        "related_document": None,
+        "is_polling": True,
+        "last_error": None,
+        "last_updated_at": now,
+        "poll_failure_count": 0,
+    }
+
+
+def _pending_recent_upload(row: sqlite3.Row, history: dict | None = None) -> dict:
+    task_id = row["paperless_task_id"] or f"pending-{row['id']}"
+    entry = {**_recent_upload_defaults(task_id), **(history or {})}
+    updated_at = datetime.fromisoformat(row["updated_at"]).replace(tzinfo=timezone.utc)
+    timestamp = int(updated_at.timestamp() * 1000)
+    if history is None:
+        entry["submitted_at"] = timestamp
+        entry["last_updated_at"] = timestamp
+    else:
+        entry["last_updated_at"] = max(timestamp, entry["last_updated_at"])
+    entry["device_name"] = row["device_name"] or entry["device_name"]
+    entry["file_name"] = row["original_filename"] or entry["file_name"]
+    entry["related_document"] = row["paperless_document_id"] or entry["related_document"]
+    if row["state"] == "submitted":
+        entry["task_status"] = "SUCCESS"
+    elif row["state"] == "failed":
+        entry["task_status"] = "FAILURE"
+        entry["result_text"] = row["last_error"]
+    entry["is_polling"] = bool(row["paperless_task_id"]) and entry["task_status"] not in {
+        "SUCCESS", "FAILURE",
+    }
+    return entry
+
+
+def upsert_recent_upload(
+    username: str,
+    task_id: str,
+    updates: dict | None = None,
+    *,
+    paths: StoragePaths | None = None,
+) -> dict:
+    task_id = task_id.strip()
+    if not username.strip() or not task_id:
+        raise ValueError("username and task_id are required for recent upload history.")
+    connection, _ = _connect(paths)
+    try:
+        # Serialize read/merge/write across workers, not just threads in one process.
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT payload_json FROM recent_uploads WHERE username = ? AND task_id = ?",
+            (username, task_id),
+        ).fetchone()
+        existing_submission = row is not None
+        if row is not None:
+            entry = json.loads(row["payload_json"])
+        else:
+            pending = connection.execute(
+                """SELECT * FROM pending_documents
+                   WHERE username = ? AND paperless_task_id = ?
+                   ORDER BY updated_at DESC, id DESC LIMIT 1""",
+                (username, task_id),
+            ).fetchone()
+            existing_submission = pending is not None
+            entry = _pending_recent_upload(pending) if pending else _recent_upload_defaults(task_id)
+        next_updates = dict(updates or {})
+        if existing_submission:
+            # Duplicate notifications and polls must not move an upload in history.
+            next_updates.pop("submitted_at", None)
+        # Poll responses often omit filenames; preserve the known filename/device.
+        for field in ("file_name", "device_name", "related_document"):
+            if next_updates.get(field) is None:
+                next_updates.pop(field, None)
+        next_updates.setdefault("last_updated_at", int(time.time() * 1000))
+        entry.update(next_updates)
+        entry["task_id"] = task_id
+        connection.execute(
+            """INSERT INTO recent_uploads(username, task_id, submitted_at, payload_json)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(username, task_id) DO UPDATE SET
+                   submitted_at = excluded.submitted_at, payload_json = excluded.payload_json""",
+            (username, task_id, entry["submitted_at"], json.dumps(entry)),
+        )
+        connection.commit()
+        return entry
+    finally:
+        connection.close()
+
+
+def list_recent_uploads(
+    username: str, *, limit: int = 30, paths: StoragePaths | None = None,
+) -> list[dict]:
+    connection, _ = _connect(paths)
+    try:
+        # One snapshot keeps the persistent pending state and legacy history in sync.
+        connection.execute("BEGIN")
+        entries = {
+            row["task_id"]: json.loads(row["payload_json"])
+            for row in connection.execute(
+                "SELECT task_id, payload_json FROM recent_uploads WHERE username = ?",
+                (username,),
+            )
+        }
+        pending_rows = connection.execute(
+            """SELECT * FROM pending_documents
+               WHERE username = ? AND state IN ('submitting', 'submitted', 'failed')
+               ORDER BY updated_at DESC, id DESC""",
+            (username,),
+        ).fetchall()
+        seen = set()
+        for row in pending_rows:
+            task_id = row["paperless_task_id"] or f"pending-{row['id']}"
+            if task_id in seen:
+                continue
+            seen.add(task_id)
+            entries[task_id] = _pending_recent_upload(row, entries.get(task_id))
+        return sorted(
+            entries.values(), key=lambda entry: (entry["submitted_at"], entry["task_id"]),
+            reverse=True,
+        )[:limit]
+    finally:
+        connection.close()
 
 
 def _normalize_tag_ids(tag_ids) -> list[int]:

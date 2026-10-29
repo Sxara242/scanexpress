@@ -513,10 +513,11 @@ class ApiPaperlessTaskTests(unittest.TestCase):
     def setUp(self):
         scan_app.app.config["TESTING"] = True
         self.client = scan_app.app.test_client()
-
-    def tearDown(self):
-        with scan_app._RECENT_UPLOADS_LOCK:
-            scan_app._RECENT_UPLOADS_BY_USER.clear()
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        environment = patch.dict("os.environ", {"SCANEXPRESS_DATA_DIR": temporary.name})
+        environment.start()
+        self.addCleanup(environment.stop)
 
     @patch("app.requests.get")
     def test_get_paperless_task_status_returns_normalized_started_payload(self, mock_requests_get):
@@ -630,10 +631,11 @@ class ApiRecentUploadsTests(unittest.TestCase):
     def setUp(self):
         scan_app.app.config["TESTING"] = True
         self.client = scan_app.app.test_client()
-
-    def tearDown(self):
-        with scan_app._RECENT_UPLOADS_LOCK:
-            scan_app._RECENT_UPLOADS_BY_USER.clear()
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        environment = patch.dict("os.environ", {"SCANEXPRESS_DATA_DIR": temporary.name})
+        environment.start()
+        self.addCleanup(environment.stop)
 
     def test_get_recent_uploads_returns_empty_list_by_default(self):
         fake_config_manager = Mock()

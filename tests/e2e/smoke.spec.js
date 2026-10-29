@@ -661,7 +661,7 @@ test("recent uploads records permanent upload timeout as failure", async ({ page
   await expect(firstRow.locator("a")).toHaveCount(0);
 });
 
-test("recent uploads keeps max 10 entries in newest-first order", async ({ page }) => {
+test("recent uploads keeps max 30 entries in newest-first order", async ({ page }) => {
   let sequence = 0;
 
   await page.route("**/api/scan/stream", async (route) => {
@@ -700,14 +700,14 @@ test("recent uploads keeps max 10 entries in newest-first order", async ({ page 
   await page.goto("/");
 
   const scanButton = page.getByRole("button", { name: "Start Scan" });
-  for (let index = 0; index < 11; index += 1) {
+  for (let index = 0; index < 31; index += 1) {
     await scanButton.click();
     await expect(page.locator("#statusText")).toHaveText(/^Status: ok \(.+\)$/);
   }
 
   const entries = page.locator("#recentUploadsBody tr");
-  await expect(entries).toHaveCount(10);
-  await expect(entries.first()).toContainText("task-11");
+  await expect(entries).toHaveCount(30);
+  await expect(entries.first()).toContainText("task-31");
   await expect(entries.last()).toContainText("task-2");
 });
 

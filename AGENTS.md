@@ -1,79 +1,38 @@
 # AGENTS.md
 
-Guidance for AI coding agents working in `scanexpress`.
+Guidance for coding agents working in ScanExpress.
 
-## Project Snapshot
+## Safety and workflow
 
-- App type: Flask web app with server-rendered entry page and small frontend JS.
-- Backend entrypoint: `app.py`.
-- Frontend files: `templates/index.html`, `static/app.js`.
-- Current state: scaffold only; `/api/scan` returns `501 not_implemented`.
-- Intended direction: trigger local scanner hardware and send results to Paperless-ngx.
+- Preserve user data and existing functionality. Never discard existing changes.
+- Never modify the production Dell, its SQLite database, or its services without approval.
+- Use a dedicated fix branch for each bug fix.
+- Never commit, push, merge, or deploy without explicit approval.
+- Never store credentials or sensitive document data in Git. Keep databases and scan files outside the working tree.
+- Finish each task with a short summary of changes, tests, and outstanding issues.
 
-## Architecture Constraints
+## Implementation
 
-- Keep the app simple: one Flask service, one HTML template, one frontend JS file unless a change requires refactoring.
-- Preserve current route structure unless asked:
-  - `GET /` renders the UI
-  - `POST /api/scan` triggers scanning flow
-- Prefer incremental changes over broad rewrites.
-- Keep backend and frontend behavior in sync (status values/messages).
+- Read existing code and relevant documentation before editing; read `CODEX_HANDOFF.md` and `docs/SCANNER_MANAGER_MASTER_SPEC.md` before architectural changes.
+- Keep the Flask service, server-rendered templates, and vanilla JavaScript simple. Prefer incremental changes and preserve routes and frontend/backend contracts unless asked.
+- Follow existing Python style; keep functions small and explicit. Use `config.ini` for endpoints, credentials, device paths, and scanner settings. Use `SCANEXPRESS_CONFIG_FILE` only to override its path.
+- Isolate scanner invocation for testing, set timeouts, validate outputs before upload, and return structured JSON errors with actionable messages.
+- Handle frontend network and parse errors gracefully; keep controls accessible and status text concise.
+- Never log sensitive headers or tokens. Do not run destructive scanner commands unless requested.
 
-## Coding Standards
+## Testing
 
-- General:
-  - Test-first policy (mandatory): For any code change, write or update the relevant test(s) first when possible, execute the tests to verify they're failing and only then implement code.
-- Python:
-  - Follow existing Flask style in `app.py`.
-  - Keep functions small and explicit.
-  - Use `config.ini` as the runtime source of truth for endpoints, credentials, device paths, and scanner settings.
-  - Only use `SCANEXPRESS_CONFIG_FILE` environment variable when the config file path must be overridden.
-  - Do not hardcode secrets or host-specific paths.
-- JavaScript:
-  - Keep to vanilla JS (no framework additions unless explicitly requested).
-  - Handle network and parse errors gracefully.
-  - Keep UI state text clear and concise.
-- HTML:
-  - Avoid unnecessary complexity; keep controls accessible and semantic.
+- Add regression tests for bug fixes. Write or update relevant tests first when possible, run them to confirm failure, then implement the change.
+- Activate the repository virtual environment before every project test command:
 
-## Integration Expectations (When Implementing Scan)
+    source .venv/bin/activate
 
-- Scanner invocation should be isolated behind a backend function/module to support testing.
-- Add timeouts and actionable error messages for scanner failures.
-- Validate file outputs before upload steps.
-- Paperless-ngx integration should:
-  - read base URL + auth from `config.ini`,
-  - fail safely with useful error responses,
-  - avoid logging sensitive headers/tokens.
+- Use temporary databases and synthetic documents for tests; never use production data.
+- Run focused tests and appropriate existing checks. Verify app startup with `python app.py`, page loading, scan-button status updates, and the expected `/api/scan` response using fake hardware/services.
+- For UI or `/api/scan` contract changes, also run `npm run test:e2e`. Keep tests lightweight.
 
-## Testing & Verification
+## Documentation
 
-- Before running any project tests, activate the repository virtual environment first: `source .venv/bin/activate`.
-- Run test commands with the activated venv so project dependencies (Flask, requests, Pillow, Playwright tooling, etc.) resolve correctly.
-
-- Minimum checks after code changes:
-  1. App starts: `python app.py`
-  2. `/` loads and button click updates status text
-  3. `/api/scan` behavior matches expected status code/payload
-- For UI or `/api/scan` contract changes, also run `npm run test:e2e`.
-- If tests are added, keep them focused and lightweight (do not introduce heavy frameworks without request).
-
-## Documentation Rules
-
-- Update `README.md` for any new setup steps, env vars, or behavior changes.
-- Keep `docs/ARCHITECTURE.md` aligned when changing flow or major components.
-- For command/script examples in Markdown docs, use 4-space-indented blocks; do not use triple-backtick fenced code blocks.
-- Always include blank lines before and after lists for readability.
-- Add blank lines before and after all headings (e.g., `## Heading` with blank line above and below).
-- Never use multiple consecutive blank lines; maximum one blank line between sections.
-- No trailing spaces at end of lines.
-
-## Safe Defaults
-
-- Prefer explicit config over implicit assumptions.
-- Return structured JSON errors from API endpoints.
-- Avoid destructive operations and shell commands that can alter system scanner state unless requested.
-
-## Suggested Environment Variables
-
-- `SCANEXPRESS_CONFIG_FILE` (optional path override only)
+- Update `README.md` for setup or behavior changes and `docs/ARCHITECTURE.md` for flow or component changes.
+- Use four-space-indented Markdown command examples, never fenced code blocks.
+- Leave one blank line around headings and lists; avoid consecutive blank lines and trailing spaces.

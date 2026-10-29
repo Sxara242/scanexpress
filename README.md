@@ -187,11 +187,15 @@ On successful completion, scan responses include `timing_metrics` (`total_second
 
 UI recent upload tracking:
 
-- The page shows a `Recent uploads` list (latest 10 entries, newest first).
-- Recent uploads are stored in server memory per configured user and loaded via `GET /api/recent-uploads`.
-- Refreshing the page keeps that user's recent uploads visible; entries are not shared across users.
+- The page shows a `Recent uploads` list (latest 30 entries, newest first).
+- `GET /api/recent-uploads` combines existing SQLite Pending submission records with durable legacy upload/failure history, isolated per user and deduplicated by Task ID.
+- Submitted records retain their saved Task ID, Document ID, filename, device, and terminal status across page reloads and service restarts. Ready documents remain in Pending, outside upload history.
+- Submissions returning a Document ID without a Task ID also appear as completed uploads; their history key is `pending-<pending_id>` and they are never polled.
+- Existing records use their saved `updated_at` as the submission-time fallback. Updates and duplicate upload notifications preserve the original submission time and historical ordering.
+- Storage schema version 4 adds only the `recent_uploads` table; existing document records, spool files, and retention policies are unchanged. The 30-entry limit affects display only.
 - For each entry with `paperless_task_id`, the frontend polls backend task status every 2 seconds until a terminal state.
 - Polling uses backend proxy endpoint `GET /api/paperless/tasks/<task_id>` so browser clients never call Paperless directly with tokens.
+- Task status is normalized to uppercase. Document IDs are validated as positive integers, using `related_document`, then `result_data.document_id`, then the first valid value in `related_document_ids`.
 - On `SUCCESS` with `related_document`, the UI renders a link to `<paperless_base_url>/documents/<related_document>`.
 
 Configuration resolution is **config-first with env fallback**:
@@ -231,6 +235,10 @@ Required scan output mode per device:
 
 - Each device section (`[user:<username>:device:<device_name>]` or `[device:<device_name>]`) must define `scan_output_mode` as either `batch` or `single_file`.
 - `batch` and `single_file` map to mutually exclusive scanner flags (`--batch` vs `--output-file`).
+
+## Deployment review for the upload-history fix
+
+Production deployment requires explicit approval. Before any later deployment, preserve and compare the Dell's uncommitted `app.py` ID-parsing fix with this branch; reconcile the diff without overwriting or discarding it. Back up the configured SQLite database consistently, including any WAL state, before the additive schema upgrade. Confirm the production configuration and data-directory ownership; do not replace the database or scan files with development data. Validate the saved submitted record after the approved upgrade. A return to older code should leave the additive table and existing data intact.
 
 ## License
 

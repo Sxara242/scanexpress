@@ -62,7 +62,7 @@ class StorageBootstrapTests(unittest.TestCase):
                     )
                 }
 
-            self.assertEqual(version, 3)
+            self.assertEqual(version, 4)
             self.assertTrue(
                 {"scan_sessions", "pending_documents", "pending_metadata"}.issubset(
                     table_names
@@ -86,7 +86,7 @@ class StorageBootstrapTests(unittest.TestCase):
                     "SELECT version FROM schema_migrations ORDER BY version"
                 ).fetchall()
 
-            self.assertEqual(versions, [(1,), (2,), (3,)])
+            self.assertEqual(versions, [(1,), (2,), (3,), (4,)])
 
 
 class PendingDocumentStorageTests(unittest.TestCase):

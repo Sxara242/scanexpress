@@ -25,3 +25,11 @@
 - API and frontend are kept in one project for simplicity.
 - Playwright smoke tests (`tests/e2e/smoke.spec.js`) validate the UI/API contract against the local Flask server.
 - E2E avoids real hardware by using a fake scan wrapper command and a local fake Paperless endpoint.
+
+## Persistent recent uploads
+
+`GET /api/recent-uploads` reads the existing `pending_documents` rows for the active user in submitting, submitted, or failed state. Ready documents stay in Pending. The saved Paperless Task ID and Document ID, original filename, device, and state restore history after process restarts without contacting Paperless. Submitted maps to SUCCESS, failed maps to FAILURE, and in-flight tasks resume polling. A direct Document ID response uses a stable `pending-<pending_id>` history key and never polls.
+
+SQLite schema version 4 adds `recent_uploads` for legacy upload/failure records and task-poll details previously held in memory. Upserts use a `(username, task_id)` primary key and a database write transaction, so workers share history without duplicate entries or lost field updates. Reads merge these details with authoritative Pending records in a single snapshot and return the newest 30 unique entries using the existing JSON fields. Missing poll filenames do not erase saved names. Existing Pending rows use `updated_at` as a submission-time fallback; the first history write preserves that time. Later updates and duplicate upload notifications preserve the original `submitted_at` and historical ordering. No existing document rows or retention policies are changed by history reads or the additive migration.
+
+The Paperless task normalizer accepts positive integer Document IDs from `related_document`, `result_data.document_id`, or the first valid `related_document_ids` entry, in that order. It normalizes task status to uppercase before history and Pending-state updates, preserving the existing frontend contract.
